@@ -157,30 +157,6 @@ async def post_bot(request: Request):
         logger.info(f"Executing hangup for {call_sid}")
         pending_hangups.remove(call_sid)
         return Response(content='<Response><Hangup/></Response>', media_type="application/xml")
-        target_number = transfer_data["number"]
-        target_name = transfer_data["name"]
-        
-        # Get caller info to send the 'answer' event to Zammad
-        call_info = active_calls.get(call_sid, {})
-        from_num = call_info.get("from", "Unknown")
-        
-        logger.info(f"Executing transfer for {call_sid} to {target_name} ({target_number})")
-        
-        # Push 'answer' to Zammad with the new target person's name
-        asyncio.create_task(zammad_cti.push_cti_event(
-            event="answer",
-            from_number=from_num,
-            to_number=target_number,
-            direction="in",
-            call_id=call_sid,
-            user_name=target_name
-        ))
-
-        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
-        <Response>
-            <Dial>{target_number}</Dial>
-        </Response>"""
-        return Response(content=twiml, media_type="application/xml")
     
     # Cleanup active_calls
     active_calls.pop(call_sid, None)
@@ -232,6 +208,12 @@ async def websocket_endpoint(websocket: WebSocket):
     caller_number = call_data.get("body", {}).get("caller_number", "Unknown Caller")
     destination_number = call_data.get("body", {}).get("destination_number", "Unknown")
     caller_name = call_data.get("body", {}).get("caller_name", "")
+    # Title-case CNAM (arrives as ALL CAPS like "DAVID BLUM") and extract first name
+    if caller_name:
+        caller_name = caller_name.strip().title()
+        caller_first_name = caller_name.split()[0] if caller_name.split() else caller_name
+    else:
+        caller_first_name = ""
 
     # Store active call info for CTI updates during transfer
     active_calls[call_sid] = {
@@ -500,6 +482,12 @@ async def websocket_endpoint(websocket: WebSocket):
         nonlocal is_terminating
         phone_number = args.arguments.get("phone_number")
         contact_name = args.arguments.get("contact_name", "a volunteer")
+        
+        # Guard against hallucinated/placeholder phone numbers (e.g. from cancelled lookups)
+        if phone_number and "555" in phone_number.replace("-", "").replace(" ", ""):
+            call_logger.warning(f"Rejected hallucinated phone number: {phone_number}")
+            return {"status": "error", "message": f"The phone number {phone_number} appears to be invalid. Please use lookup_contact to find the real phone number first."}
+        
         call_logger.info(f"Transferring call for {call_data['call_id']} to {contact_name} at {phone_number}")
         
         call_sid = call_data["call_id"]
@@ -579,8 +567,16 @@ async def websocket_endpoint(websocket: WebSocket):
         await params.result_callback({"status": "success", "message": result})
 
     async def create_contact_handler(params: FunctionCallParams):
-        first = params.arguments.get("first_name")
-        last = params.arguments.get("last_name")
+        first = (params.arguments.get("first_name") or "").strip()
+        last = (params.arguments.get("last_name") or "").strip()
+        
+        # Guard against sentinel/placeholder names that Gemini may hallucinate
+        BLOCKED_NAMES = {"unknown", "caller", "anonymous", "unavailable", "n/a", "none"}
+        if first.lower() in BLOCKED_NAMES or last.lower() in BLOCKED_NAMES:
+            call_logger.warning(f"Rejected sentinel contact name: {first} {last}")
+            await params.result_callback({"status": "error", "message": "That does not appear to be a real name. Please ask the caller for their actual first and last name."})
+            return
+        
         logger.info(f"Bot creating new contact: {first} {last} for number {caller_number}")
         result_data = await civicrm_agent.create_contact(first, last, caller_number)
         if result_data["success"]:
@@ -728,25 +724,27 @@ async def websocket_endpoint(websocket: WebSocket):
     task = PipelineTask(pipeline, params=PipelineParams(audio_in_sample_rate=8000, audio_out_sample_rate=8000, enable_metrics=True, enable_usage_metrics=True))
 
     caller_contact_id = None
+    caller_recognized_name = None  # CiviCRM first name, set when caller is recognized
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
         logger.info(f"Client connected: {client}")
         now = datetime.now(ZoneInfo("America/Chicago")).strftime("%A, %B %d, %Y at %I:%M %p")
         
-        nonlocal caller_contact_id
+        nonlocal caller_contact_id, caller_recognized_name
         contact_info = await civicrm_lookup.lookup_contact_by_phone(caller_number)
         
-        detail_block = f"CURRENT CALLER INFO: Unknown Caller."
+        detail_block = ""
         if caller_name:
-            detail_block = f"CURRENT CALLER INFO: Unknown but identified via CNAM as {caller_name}."
-            greeting = f"'Thank you for calling 10BitWorks, San Antonio's largest, member-supported, nonprofit makerspace! Am I speaking with {caller_name}?'"
+            detail_block = f"CURRENT CALLER INFO: Unrecognized caller identified via CNAM as {caller_name}."
+            greeting = f"'Thank you for calling 10BitWorks, San Antonio's largest, member-supported, nonprofit makerspace! Am I speaking with {caller_first_name}?'"
         else:
             greeting = "'Thank you for calling 10BitWorks, San Antonio's largest, member-supported, nonprofit makerspace! Who am I speaking with today?'"
         
         if contact_info:
             caller_contact_id = contact_info["contact_id"]
             name = contact_info["name"]
+            caller_recognized_name = name
             
             # Fetch full profile in parallel to reduce handshake latency
             membership, contact_details = await asyncio.gather(
@@ -817,7 +815,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Generate transcript for logging/ticketing
                 transcript = ""
                 # Determine display name for the caller
-                display_user_name = caller_name if caller_name else "Caller"
+                display_user_name = caller_recognized_name or caller_name or "Caller"
                 
                 role_map = {
                     "assistant": "Receptionist",
@@ -847,41 +845,41 @@ async def websocket_endpoint(websocket: WebSocket):
                             call_logger.error(f"Failed to log transcript to CiviCRM: {e}")
                         
                     # Create Zammad ticket with full transcript
-                    customer_id = "10bot@10bitworks.org" # Fallback customer
+                    customer_id = "10bot@10bitworks.org"  # Fallback customer
                     email = await civicrm_agent.get_contact_email(caller_contact_id)
                     if email:
                         customer_id = email
                     
-                        try:
-                            ticket = await zammad_agent.create_ticket(
-                                title=f"Call Transcript: {caller_number}",
-                                body=f"Full transcript of call from {caller_number}:\n\n{transcript if transcript else 'No conversational dialogue recorded.'}",
-                                customer=customer_id,
-                                owner="10bot@10bitworks.org",
-                                article_type="phone"
-                            )
-                            if ticket:
-                                call_logger.info(f"Created Zammad ticket {ticket.get('id')} for recognized caller {customer_id}")
-                            else:
-                                call_logger.warning("Zammad ticket creation returned None.")
-                        except Exception as e:
-                            call_logger.error(f"Failed to create Zammad ticket for recognized caller: {e}")
-                    else:
-                        # For unrecognized callers, create ticket assigned to 10bot
-                        try:
-                            ticket = await zammad_agent.create_ticket(
-                                title=f"Call Transcript (Unrecognized): {caller_number}",
-                                body=f"Full transcript of call from {caller_number}:\n\n{transcript if transcript else 'No conversational dialogue recorded.'}",
-                                customer="10bot@10bitworks.org",
-                                owner="10bot@10bitworks.org",
-                                article_type="phone"
-                            )
-                            if ticket:
-                                call_logger.info(f"Created Zammad ticket {ticket.get('id')} for unrecognized caller")
-                            else:
-                                call_logger.warning("Zammad ticket creation returned None.")
-                        except Exception as e:
-                            call_logger.error(f"Failed to create Zammad ticket for unrecognized caller: {e}")
+                    try:
+                        ticket = await zammad_agent.create_ticket(
+                            title=f"Call Transcript: {caller_number}",
+                            body=f"Full transcript of call from {caller_number}:\n\n{transcript if transcript else 'No conversational dialogue recorded.'}",
+                            customer=customer_id,
+                            owner="10bot@10bitworks.org",
+                            article_type="phone"
+                        )
+                        if ticket:
+                            call_logger.info(f"Created Zammad ticket {ticket.get('id')} for recognized caller {customer_id}")
+                        else:
+                            call_logger.warning("Zammad ticket creation returned None.")
+                    except Exception as e:
+                        call_logger.error(f"Failed to create Zammad ticket for recognized caller: {e}")
+                else:
+                    # Truly unrecognized callers (no CiviCRM contact)
+                    try:
+                        ticket = await zammad_agent.create_ticket(
+                            title=f"Call Transcript (Unrecognized): {caller_number}",
+                            body=f"Full transcript of call from {caller_number}:\n\n{transcript if transcript else 'No conversational dialogue recorded.'}",
+                            customer="10bot@10bitworks.org",
+                            owner="10bot@10bitworks.org",
+                            article_type="phone"
+                        )
+                        if ticket:
+                            call_logger.info(f"Created Zammad ticket {ticket.get('id')} for unrecognized caller")
+                        else:
+                            call_logger.warning("Zammad ticket creation returned None.")
+                    except Exception as e:
+                        call_logger.error(f"Failed to create Zammad ticket for unrecognized caller: {e}")
             except Exception as e:
                 call_logger.error(f"Critical error in post-call processing: {e}")
             
