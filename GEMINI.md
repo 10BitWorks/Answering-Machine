@@ -67,9 +67,17 @@ I will modify the SYSTEM_PROMPT file myself. You may suggest, but don't touch it
 
 ## 7. CiviCRM Contact Management
 *   **Create Contact**: The bot proactively creates new contact records for unrecognized callers using the `create_my_contact_record` tool as soon as they provide a first and last name. This ensures all inquiries are accurately logged in CiviCRM.
+*   **Sentinel Name Guard**: The `create_contact_handler` rejects names like "Unknown", "Caller", "Anonymous", etc. to prevent Gemini from creating bogus records when it misinterprets context text as a caller's name.
 *   **Safe Updates**: Data management tools (address, phone, email) are "add-only" or "primary-toggle" to prevent accidental deletion or overwriting of existing records. The bot cannot delete records.
 *   **Membership Intelligence**: Membership info now includes `join_date` and `start_date` alongside `end_date`, providing the bot with full context on the user's history with the makerspace.
 
+## 8. Caller Identification & Greeting
+*   **CNAM Handling**: Twilio CNAM arrives in ALL CAPS (e.g. "DAVID BLUM"). The code title-cases it and extracts the first name for the greeting ("Am I speaking with David?"), while passing the full name in the context `detail_block` for the bot's reference.
+*   **Unknown Callers**: When neither CiviCRM nor CNAM identifies the caller, the `detail_block` is left empty — do NOT inject "Unknown Caller" or similar sentinel text that Gemini might interpret as a name.
+*   **Transcript Labels**: Use `caller_recognized_name` (CiviCRM first name) over `caller_name` (CNAM) over "Caller" for transcript speaker labels.
+*   **Transfer Phone Guard**: The `transfer_call_handler` rejects phone numbers containing "555" to prevent Gemini from dialing hallucinated placeholder numbers when a `lookup_contact` call gets cancelled by user interruption.
+*   **Time Limit**: The SYSTEM_PROMPT does NOT mention call time limits. Time warnings are injected programmatically via `session_warning_task` at 7, 8, and 9 minutes only.
 
-## 8. Deployment & CI/CD
+
+## 9. Deployment & CI/CD
 *   **Auto-Deployment**: The production stack (`call-bot` on port 17293) is configured to auto-update and redeploy automatically whenever changes are pushed to the `main` branch. 
