@@ -80,4 +80,4 @@ I will modify the SYSTEM_PROMPT file myself. You may suggest, but don't touch it
 
 
 ## 9. Deployment & CI/CD
-*   **Auto-Deployment**: The production stack (`call-bot` on port 17293) is configured to auto-update and redeploy automatically whenever changes are pushed to the `main` branch. 
+*   **Auto-Deployment**: The production stack (`call-bot` on port 17293) is configured to auto-update and redeploy automatically whenever changes are pushed to the `main` branch. The dev stack does the same on the `dev` branch.
