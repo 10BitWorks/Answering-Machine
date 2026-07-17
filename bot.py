@@ -188,6 +188,15 @@ async def recording_callback(request: Request):
     else:
         payload["Transcript"] = "No transcript available."
         
+    # Inject HTTP basic auth into the RecordingUrl if present
+    if "RecordingUrl" in payload:
+        account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+        auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+        if account_sid and auth_token:
+            url = payload["RecordingUrl"]
+            if url.startswith("https://"):
+                payload["RecordingUrl"] = f"https://{account_sid}:{auth_token}@{url[8:]}"
+                
     recording_webhook = os.getenv("RECORDING_SLACK_WEBHOOK_URL")
     if recording_webhook:
         async with httpx.AsyncClient() as client:
