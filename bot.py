@@ -407,7 +407,7 @@ async def websocket_endpoint(websocket: WebSocket):
             ),
             FunctionSchema(
                 name="update_call_summary",
-                description="Update the running summary of this phone call. You MUST call this tool after answering each question or resolving each topic. Include who is calling, what they asked about, what answers were given, and whether their query was fully resolved. If not fully resolved, suggest follow-up actions. Be as verbose as needed to capture all important details.",
+                description="Update the running summary of this phone call. You MUST call this tool after each meaningful question is addressed. Include who is calling, what they asked about, what answers were given, and whether their query was fully resolved. If not fully resolved, suggest follow-up actions. Be as verbose as needed to capture all important details.",
                 properties={
                     "summary": {
                         "type": "string",
@@ -554,7 +554,8 @@ async def websocket_endpoint(websocket: WebSocket):
         # Guard against hallucinated/placeholder phone numbers (e.g. from cancelled lookups)
         if phone_number and "555" in phone_number.replace("-", "").replace(" ", ""):
             call_logger.warning(f"Rejected hallucinated phone number: {phone_number}")
-            return {"status": "error", "message": f"The phone number {phone_number} appears to be invalid. Please use lookup_contact to find the real phone number first."}
+            await args.result_callback({"status": "error", "message": f"The phone number {phone_number} appears to be invalid. Please use lookup_contact to find the real phone number first."})
+            return
         
         call_logger.info(f"Transferring call for {call_data['call_id']} to {contact_name} at {phone_number}")
         
@@ -567,12 +568,16 @@ async def websocket_endpoint(websocket: WebSocket):
         if call_sid in pending_hangups:
             pending_hangups.remove(call_sid)
             
-        # Start snappy termination task and return success for a farewell
+        # Send the tool result FIRST so Gemini receives the instruction to announce the transfer
+        await args.result_callback({"status": "transfer_initiated", "instruction": f"You are now transferring the call to {contact_name}. Briefly inform the user that you are connecting them now. CRITICAL: Do NOT call the end_call tool yourself; the system handles the hangup naturally after the transfer."})
+        
+        # Give Gemini time to process the result and begin generating its announcement
+        await asyncio.sleep(1.0)
+        
+        # NOW start the termination task — Gemini should already be speaking
         if not is_terminating:
             is_terminating = True
             asyncio.create_task(wait_and_terminate())
-            
-        return {"status": "transfer_initiated", "instruction": f"You are now transferring the call to {contact_name}. Briefly inform the user that you are connecting them now. CRITICAL: Do NOT call the end_call tool yourself; the system handles the hangup naturally after the transfer."}
 
     async def lookup_contact_handler(params: FunctionCallParams):
         contact_name = params.arguments.get("contact_name")
