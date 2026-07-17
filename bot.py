@@ -107,7 +107,10 @@ async def twiml(request: Request):
         
     twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
-        <Connect record="record-from-answer-dual" recordingStatusCallback="https://{host}/recording-callback" recordingStatusCallbackMethod="POST">
+        <Start>
+            <Recording channels="dual" recordingStatusCallback="https://{host}/recording-callback" recordingStatusCallbackMethod="POST" />
+        </Start>
+        <Connect>
             <Stream url="wss://{host}/ws">
                 <Parameter name="caller_number" value="{from_number}" />
                 <Parameter name="destination_number" value="{to_number}" />
