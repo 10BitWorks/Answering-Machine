@@ -198,6 +198,27 @@ async def recording_callback(request: Request):
             if url.startswith("https://"):
                 payload["RecordingUrl"] = f"https://{account_sid}:{auth_token}@{url[8:]}"
                 
+    if payload.get("Transcript") and payload["Transcript"] != "No transcript available.":
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if api_key:
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    summary_res = await client.post(
+                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}",
+                        json={
+                            "contents": [{"parts": [{"text": f"Summarize this phone call transcript in 2-3 sentences:\n\n{payload['Transcript']}"}]}]
+                        }
+                    )
+                    summary_res.raise_for_status()
+                    payload["Summary"] = summary_res.json()["candidates"][0]["content"]["parts"][0]["text"]
+            except Exception as e:
+                logger.error(f"Failed to generate summary: {e}")
+                payload["Summary"] = "Failed to generate summary."
+        else:
+            payload["Summary"] = "GOOGLE_API_KEY not configured."
+    else:
+        payload["Summary"] = "No transcript available to summarize."
+                
     recording_webhook = os.getenv("RECORDING_SLACK_WEBHOOK_URL")
     if recording_webhook:
         async with httpx.AsyncClient() as client:
