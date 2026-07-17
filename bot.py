@@ -395,7 +395,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 properties={
                     "question": {
                         "type": "string",
-                        "description": "The message to send to the support bot. You MUST introduce yourself, state who you are handling a call from, summarize what was discussed so far, clearly state the specific question, and explicitly ask for a quick response in unformatted text."
+                        "description": "The message to send to the support bot. The first time you call this tool, you MUST introduce yourself, state who you are handling a call from, summarize what was discussed so far, clearly state the specific question, and ask for an unformatted text response within 20 seconds."
                     }
                 },
                 required=["question"]
