@@ -655,16 +655,16 @@ async def websocket_endpoint(websocket: WebSocket):
                     answer = data.get("choices", [{}])[0].get("message", {}).get("content", "")
                     if not answer:
                         call_logger.warning("Goclaw returned empty response")
-                        answer = "ERROR: The support bot returned an empty response. Apologize to the caller and say you couldn't find that information right now."
+                        answer = "ERROR: The support bot returned an empty response. It may not be able to help with this query. Proceed to answer on your own."
                     else:
                         call_logger.info(f"Goclaw responded ({len(answer)} chars)")
                     
             except httpx.TimeoutException:
                 call_logger.error("Goclaw request timed out")
-                answer = "TIMEOUT: The support bot is taking too long to respond. Apologize to the caller and say you are unable to check that right now."
+                answer = "TIMEOUT: The support bot is taking too long to respond. Proceed to answer on your own."
             except Exception as e:
                 call_logger.error(f"Goclaw request failed: {e}")
-                answer = "ERROR: The support bot is currently unavailable. Apologize to the caller and say you are unable to check that right now."
+                answer = "ERROR: The support bot is currently unavailable. Proceed to answer on your own."
             finally:
                 # Signal the tool handler task that it can safely finish
                 finished_event.set()
