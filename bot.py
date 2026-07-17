@@ -62,6 +62,7 @@ if not STUDIO_WEBHOOK_URL:
 pending_transfers = {}
 pending_hangups = set()
 active_calls = {} # {call_sid: {"from": ..., "to": ...}}
+call_transcripts = {} # {call_sid: "transcript text"}
 
 # Sync knowledgebase on startup
 logger.info("Syncing knowledgebase from Zammad...")
@@ -106,7 +107,7 @@ async def twiml(request: Request):
         
     twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
-        <Connect>
+        <Connect record="record-from-answer-dual" recordingStatusCallback="https://{host}/recording-callback" recordingStatusCallbackMethod="POST">
             <Stream url="wss://{host}/ws">
                 <Parameter name="caller_number" value="{from_number}" />
                 <Parameter name="destination_number" value="{to_number}" />
@@ -172,6 +173,27 @@ async def post_bot(request: Request):
         return Response(content=twiml, media_type="application/xml")
     
     return Response(content='<Response><Hangup/></Response>', media_type="application/xml")
+
+@app.post("/recording-callback")
+async def recording_callback(request: Request):
+    form_data = await request.form()
+    payload = {k: v for k, v in form_data.items()}
+    call_sid = payload.get("CallSid")
+    
+    if call_sid in call_transcripts:
+        payload["Transcript"] = call_transcripts.pop(call_sid)
+    else:
+        payload["Transcript"] = "No transcript available."
+        
+    recording_webhook = os.getenv("RECORDING_SLACK_WEBHOOK_URL")
+    if recording_webhook:
+        async with httpx.AsyncClient() as client:
+            try:
+                await client.post(recording_webhook, json=payload)
+            except Exception as e:
+                logger.error(f"Failed to send recording webhook: {e}")
+                
+    return Response(status_code=204)
 
 
 @app.websocket("/ws")
@@ -835,6 +857,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             
                         display_name = role_map[role]
                         transcript += f"**{display_name}**: {content}\n\n"
+                        
+                if transcript:
+                    call_transcripts[call_sid] = transcript
 
                 if caller_contact_id:
                     if transcript:
