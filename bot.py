@@ -63,6 +63,7 @@ pending_transfers = {}
 pending_hangups = set()
 active_calls = {} # {call_sid: {"from": ..., "to": ...}}
 call_transcripts = {} # {call_sid: "transcript text"}
+call_summaries = {} # {call_sid: "summary text"}
 
 
 # Sync knowledgebase on startup
@@ -198,27 +199,10 @@ async def recording_callback(request: Request):
             if url.startswith("https://"):
                 payload["RecordingUrl"] = f"https://{account_sid}:{auth_token}@{url[8:]}"
                 
-    if payload.get("Transcript") and payload["Transcript"] != "No transcript available.":
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if api_key:
-            try:
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    summary_res = await client.post(
-                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}",
-                        json={
-                            "contents": [{"parts": [{"text": f"Summarize this phone call transcript in 2-3 sentences:\n\n{payload['Transcript']}"}]}]
-                        }
-                    )
-                    summary_res.raise_for_status()
-                    payload["Summary"] = summary_res.json()["candidates"][0]["content"]["parts"][0]["text"]
-            except Exception as e:
-                logger.error(f"Failed to generate summary: {e}")
-                payload["Summary"] = "Failed to generate summary."
-        else:
-            payload["Summary"] = "GOOGLE_API_KEY not configured."
+    if call_sid in call_summaries:
+        payload["Summary"] = call_summaries.pop(call_sid)
     else:
-        payload["Summary"] = "No transcript available to summarize."
-                
+        payload["Summary"] = "No summary available."
     recording_webhook = os.getenv("RECORDING_SLACK_WEBHOOK_URL")
     if recording_webhook:
         async with httpx.AsyncClient() as client:
@@ -420,6 +404,17 @@ async def websocket_endpoint(websocket: WebSocket):
                     }
                 },
                 required=["question"]
+            ),
+            FunctionSchema(
+                name="update_call_summary",
+                description="Update the running summary of this phone call. You MUST call this tool after answering each question or resolving each topic. Include who is calling, what they asked about, what answers were given, and whether their query was fully resolved. If not fully resolved, suggest follow-up actions. Be as verbose as needed to capture all important details.",
+                properties={
+                    "summary": {
+                        "type": "string",
+                        "description": "The complete, updated summary of the call so far."
+                    }
+                },
+                required=["summary"]
             )
         ],
         custom_tools={AdapterType.GEMINI: [{"google_search": {}}]},
@@ -768,6 +763,14 @@ async def websocket_endpoint(websocket: WebSocket):
     llm.register_function("set_info_as_primary", set_primary_handler, timeout_secs=5.0)
     llm.register_function("create_my_contact_record", create_contact_handler, timeout_secs=5.0)
     llm.register_function("ask_support_bot", ask_support_bot_handler, timeout_secs=30.0)
+
+    async def update_call_summary_handler(params: FunctionCallParams):
+        summary = params.arguments.get("summary", "")
+        call_summaries[call_sid] = summary
+        call_logger.info(f"Call summary updated ({len(summary)} chars)")
+        await params.result_callback({"status": "ok"})
+
+    llm.register_function("update_call_summary", update_call_summary_handler, timeout_secs=5.0)
 
     async def session_warning_task():
         try:
