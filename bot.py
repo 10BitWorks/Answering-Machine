@@ -63,6 +63,7 @@ pending_transfers = {}
 pending_hangups = set()
 active_calls = {} # {call_sid: {"from": ..., "to": ...}}
 call_transcripts = {} # {call_sid: "transcript text"}
+goclaw_sessions = {} # {call_sid: [{"role": "user", "content": "..."}]}
 
 # Sync knowledgebase on startup
 logger.info("Syncing knowledgebase from Zammad...")
@@ -164,6 +165,7 @@ async def post_bot(request: Request):
     
     # Cleanup active_calls
     active_calls.pop(call_sid, None)
+    goclaw_sessions.pop(call_sid, None)
     
     if STUDIO_WEBHOOK_URL:
         sep = "&" if "?" in STUDIO_WEBHOOK_URL else "?"
@@ -645,6 +647,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Give the bot time to speak its stall instruction before we potentially trigger speech again
                 await asyncio.sleep(0.5)
                 
+                if call_sid not in goclaw_sessions:
+                    goclaw_sessions[call_sid] = []
+                goclaw_sessions[call_sid].append({"role": "user", "content": question})
+                
                 async with httpx.AsyncClient(timeout=25.0) as client:
                     response = await client.post(
                         f"{goclaw_url.rstrip('/')}/v1/chat/completions",
@@ -655,7 +661,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             "Content-Type": "application/json"
                         },
                         json={
-                            "messages": [{"role": "user", "content": question}]
+                            "messages": goclaw_sessions[call_sid]
                         }
                     )
                     response.raise_for_status()
@@ -667,6 +673,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         answer = "ERROR: The support bot returned an empty response. It may not be able to help with this query. Proceed to answer on your own."
                     else:
                         call_logger.info(f"Goclaw responded ({len(answer)} chars)")
+                        goclaw_sessions[call_sid].append({"role": "assistant", "content": answer})
                     
             except httpx.TimeoutException:
                 call_logger.error("Goclaw request timed out")
