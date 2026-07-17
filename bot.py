@@ -698,6 +698,7 @@ async def websocket_endpoint(websocket: WebSocket):
             
             # Push directly to GeminiLiveLLMService to bypass aggregators and send to WebSocket
             await llm.process_frame(LLMMessagesAppendFrame([msg]), FrameDirection.DOWNSTREAM)
+            await llm.process_frame(LLMRunFrame(), FrameDirection.DOWNSTREAM)
         
         # Fire off the background task (survives caller interruptions)
         asyncio.create_task(_fetch_and_inject())
