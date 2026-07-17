@@ -79,5 +79,15 @@ I will modify the SYSTEM_PROMPT file myself. You may suggest, but don't touch it
 *   **Time Limit**: The SYSTEM_PROMPT does NOT mention call time limits. Time warnings are injected programmatically via `session_warning_task` at 7, 8, and 9 minutes only.
 
 
+
 ## 9. Deployment & CI/CD
 *   **Auto-Deployment**: The production stack (`call-bot` on port 17293) is configured to auto-update and redeploy automatically whenever changes are pushed to the `main` branch. The dev stack does the same on the `dev` branch.
+
+## 10. Call Summaries
+*   **Live Summary via Tool Call**: The bot continuously updates a running call summary by calling the `update_call_summary` tool after answering each question or resolving each topic. The summary is stored in the global `call_summaries` dict keyed by `call_sid`.
+*   **No Separate AI**: Do NOT use a secondary AI model/API call to generate summaries. The same Gemini Live session that handled the call produces the summary during the conversation.
+*   **Abrupt Hangup Coverage**: Because the summary is updated incrementally during the call, even if the caller hangs up abruptly, the most recent summary is already available for the webhook.
+*   **Webhook Integration**: The `/recording-callback` endpoint reads from `call_summaries` and includes it in the Slack webhook payload under the `"Summary"` key.
+
+## 11. Pipecat Parameter Renames
+*   **`audio_out_auto_silence`**: In Pipecat 1.5.0, the parameter `audio_out_can_send_silence` was renamed to `audio_out_auto_silence` in `FastAPIWebsocketParams`. Using the old name silently falls back to the default (`True`), which causes audio dropouts. Always use `audio_out_auto_silence=False`.
