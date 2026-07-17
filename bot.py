@@ -274,7 +274,7 @@ async def websocket_endpoint(websocket: WebSocket):
             add_wav_header=False,
             serializer=serializer,
             fixed_audio_packet_size=320,
-            audio_out_can_send_silence=False
+            audio_out_auto_silence=False
         )
     )
 
@@ -422,6 +422,7 @@ async def websocket_endpoint(websocket: WebSocket):
         def __init__(self):
             super().__init__()
             self.is_speaking = False
+            self.first_utterance_finished = False
 
         async def process_frame(self, frame: Frame, direction: FrameDirection):
             await super().process_frame(frame, direction)
@@ -429,6 +430,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 self.is_speaking = True
             elif isinstance(frame, BotStoppedSpeakingFrame):
                 self.is_speaking = False
+                self.first_utterance_finished = True
             elif isinstance(frame, TranscriptionFrame):
                 if frame.user_id == "user":
                     call_history.append(f"[User] {frame.text}")
@@ -440,6 +442,21 @@ async def websocket_endpoint(websocket: WebSocket):
             await self.push_frame(frame, direction)
 
     speech_tracker = SpeechTracker()
+    
+    class CallerMuter(FrameProcessor):
+        def __init__(self, tracker: SpeechTracker):
+            super().__init__()
+            self.tracker = tracker
+
+        async def process_frame(self, frame: Frame, direction: FrameDirection):
+            await super().process_frame(frame, direction)
+            # Mute caller audio until the bot finishes its first utterance
+            if not self.tracker.first_utterance_finished and isinstance(frame, AudioRawFrame) and direction == FrameDirection.DOWNSTREAM:
+                return # Drop caller audio
+            await self.push_frame(frame, direction)
+
+    caller_muter = CallerMuter(speech_tracker)
+    
     is_terminating = False # Prevent double-termination race conditions
     
     async def await_bot_silence(timeout=4.0):
@@ -705,7 +722,7 @@ async def websocket_endpoint(websocket: WebSocket):
         # Return immediately to Pipecat framework so the bot can stall naturally
         await params.result_callback({
             "status": "processing",
-            "instruction": "The support bot is looking this up now. Stall naturally while waiting — say something like 'Let me check on that for you' or 'One moment.' The answer will arrive shortly and be provided to you automatically."
+            "instruction": "The support bot is looking this up now. Stall naturally while waiting — say something like 'Let me check on that for you' or 'One moment.' or 'Let me see... looking into that for you now, just a sec.' The answer will arrive shortly and be provided to you automatically."
         })
 
         # Wait here to prevent the Pipecat tool handler task from finishing immediately.
@@ -750,6 +767,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
     pipeline = Pipeline([
         transport.input(),
+        caller_muter,
         user_aggregator,
         llm,
         assistant_aggregator,
