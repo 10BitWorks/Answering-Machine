@@ -396,18 +396,18 @@ async def websocket_endpoint(websocket: WebSocket):
             ),
             FunctionSchema(
                 name="ask_support_bot",
-                description="Consult the 10BitWorks support bot for questions you cannot answer from your own knowledge. Call this tool IMMEDIATELY when you don't know the answer. The tool will automatically return a 'processing' instruction telling you to stall naturally while it fetches the answer in the background.",
+                description="Consult the 10BitWorks support bot for questions you cannot answer from your own knowledge. This AI support agent can search Slack archives for specific answers, but takes some time. Call this tool only when you don't know the answer. The tool will automatically return a 'processing' instruction telling you to stall naturally while it fetches the answer in the background.",
                 properties={
                     "question": {
                         "type": "string",
-                        "description": "The message to send to the support bot. The first time you call this tool, you MUST introduce yourself, state who you are handling a call from, summarize what was discussed so far, clearly state the specific question, and ask for an unformatted text response within 20 seconds."
+                        "description": "The message to send to the support bot. The first time you call this tool, mention who you are handling a call from and what was discussed so far. Ask for an unformatted text response within 20 seconds."
                     }
                 },
                 required=["question"]
             ),
             FunctionSchema(
                 name="update_call_summary",
-                description="Update the running summary of this phone call. You MUST call this tool after each meaningful question is addressed. Include who is calling, what they asked about, what answers were given, and whether their query was fully resolved. If not fully resolved, suggest follow-up actions. Be as verbose as needed to capture all important details.",
+                description="Update the running summary of this phone call, to be displayed in the call history. Only call this tool after each meaningful question is addressed. Include who is calling, what they asked about, what answers were given, and whether their query was fully resolved. If not fully resolved, suggest follow-up by including the caller's number.",
                 properties={
                     "summary": {
                         "type": "string",
@@ -663,7 +663,7 @@ async def websocket_endpoint(websocket: WebSocket):
         question = params.arguments.get("question", "")
         goclaw_url = os.getenv("GOCLAW_API_URL")
         goclaw_key = os.getenv("GOCLAW_API_KEY")
-        goclaw_agent = os.getenv("GOCLAW_AGENT", "10bot")
+        goclaw_agent = os.getenv("GOCLAW_AGENT", "10BitWorks-Answering-Machine")
         
         if not goclaw_url or not goclaw_key:
             call_logger.error("GOCLAW_API_URL or GOCLAW_API_KEY not configured")
@@ -743,7 +743,7 @@ async def websocket_endpoint(websocket: WebSocket):
         # Return immediately to Pipecat framework so the bot can stall naturally
         await params.result_callback({
             "status": "processing",
-            "instruction": "The support bot is looking this up now. Stall naturally while waiting — say something like 'Let me check on that for you' or 'One moment.' or 'Let me see... looking into that for you now, just a sec.' The answer will arrive shortly and be provided to you automatically."
+            "instruction": "The support bot is looking this up now. If you have no answer to provide on your own, indicate the caller should wait by saying a phrase like 'Let me check on that for you' OR 'One moment.' OR 'Let me see... looking into that for you now.' OR 'just a sec.' The answer will arrive within 30 seconds and be provided to you automatically."
         })
 
         # Wait here to prevent the Pipecat tool handler task from finishing immediately.
@@ -820,9 +820,9 @@ async def websocket_endpoint(websocket: WebSocket):
         detail_block = ""
         if caller_name:
             detail_block = f"CURRENT CALLER INFO: Unrecognized caller identified via CNAM as {caller_name}."
-            greeting = f"'Thank you for calling 10BitWorks, San Antonio's largest, member-supported, nonprofit makerspace! Am I speaking with {caller_first_name}?'"
+            greeting = f"'You've reached the answering machine for 10BitWorks -- San Antonio's largest member-supported makerspace! Am I speaking with {caller_first_name}?'"
         else:
-            greeting = "'Thank you for calling 10BitWorks, San Antonio's largest, member-supported, nonprofit makerspace! Who am I speaking with today?'"
+            greeting = "'You've reached the answering machine for 10BitWorks -- San Antonio's largest member-supported makerspace! Who am I speaking with today?'"
         
         if contact_info:
             caller_contact_id = contact_info["contact_id"]
@@ -841,7 +841,7 @@ async def websocket_endpoint(websocket: WebSocket):
             contact_details = str(contact_details) if not isinstance(contact_details, Exception) else "Contact details unavailable."
             
             detail_block = f"CURRENT CALLER INFO: Recognized as {name} (ID: {caller_contact_id}).\n\n{membership}\n\n{contact_details}"
-            greeting = f"'Hi {name}! Thank you for calling 10BitWorks, San Antonio's largest, member-supported, nonprofit makerspace! How can I help you today?'"
+            greeting = f"'You've reached the answering machine for 10BitWorks, San Antonio's largest member-supported makerspace! How can I help you today, {name}?'"
             
         # Determine the recipient label for Zammad CTI
         recipient_label = "Makerspace"
