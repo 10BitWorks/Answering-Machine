@@ -51,15 +51,36 @@ async def block_non_twilio_traffic(request: Request, call_next):
         return Response(status_code=404)
     return await call_next(request)
 
+@app.get("/health", include_in_schema=False)
+async def health():
+    return {"status": "ok"}
+
 # Configuration
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 # Note: Using the model name without the "models/" prefix or v1alpha features
 # was required to resolve the 1011 internal error.
 MODEL_NAME = "gemini-3.1-flash-live-preview"
 
-if not GOOGLE_API_KEY:
-    logger.error("GOOGLE_API_KEY not found in environment variables")
+required_env_vars = [
+    "GOOGLE_API_KEY",
+    "TWILIO_ACCOUNT_SID",
+    "TWILIO_AUTH_TOKEN",
+    "CIVICRM_API_URL",
+    "CIVICRM_API_KEY",
+    "CIVICRM_SITE_KEY",
+    "CIVICRM_SYSTEM_CONTACT_ID",
+    "ZAMMAD_API_TOKEN",
+    "ZAMMAD_CTI_ENDPOINT",
+    "GOCLAW_API_URL",
+    "GOCLAW_API_KEY"
+]
+
+missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+if missing_vars:
+    logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
     sys.exit(1)
+
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 STUDIO_WEBHOOK_URL = os.getenv("STUDIO_WEBHOOK_URL")
 if not STUDIO_WEBHOOK_URL:
