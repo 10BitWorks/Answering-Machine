@@ -1,0 +1,14 @@
+version: "3.8"
+
+services:
+  phone-bot:
+    build: .
+    container_name: ${CONTAINER_NAME:-phone-assistant}
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
