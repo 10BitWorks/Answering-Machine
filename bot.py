@@ -94,7 +94,7 @@ except Exception as e:
     logger.error(f"Failed to load system prompt or knowledgebase: {e}")
     sys.exit(1)
 
-@app.api_route("/twiml", methods=["GET", "POST"])
+@app.api_route("/twiml", methods=["GET", "POST"], include_in_schema=False)
 async def twiml(request: Request):
     host = request.url.netloc
     
