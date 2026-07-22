@@ -195,13 +195,14 @@ async def log_call_activity(contact_id: int, subject: str, details: str):
     """
     Creates a 'Phone Call' activity (type 2) in CiviCRM associated with the given contact.
     """
+    system_contact_id = int(os.getenv("CIVICRM_SYSTEM_CONTACT_ID", "3800"))
     params = {
         "values": {
             "activity_type_id": 2, # 2 typically means Phone Call in CiviCRM
             "subject": subject,
             "details": details,
             "status_id": 2, # 2 typically means Completed
-            "source_contact_id": 3800, # 10Bot System Contact
+            "source_contact_id": system_contact_id,
             "target_contact_id": [contact_id]
         }
     }
