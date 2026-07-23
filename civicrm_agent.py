@@ -16,13 +16,13 @@ async def _call_api(entity: str, action: str, params: dict):
     site_key = os.getenv("CIVICRM_SITE_KEY")
     
     headers = {
-        "X-Civi-Auth": f"Bearer {api_key}",
-        "X-Civi-Key": site_key,
         "X-Requested-With": "XMLHttpRequest",
         "Content-Type": "application/x-www-form-urlencoded"
     }
     
     body = {
+        "api_key": api_key,
+        "key": site_key,
         "params": json.dumps(params)
     }
     

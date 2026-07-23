@@ -22,8 +22,6 @@ async def lookup_contact_by_name(full_name: str):
     site_key = os.getenv("CIVICRM_SITE_KEY")
     
     headers = {
-        "X-Civi-Auth": f"Bearer {api_key}",
-        "X-Civi-Key": site_key,
         "X-Requested-With": "XMLHttpRequest",
         "Content-Type": "application/x-www-form-urlencoded"
     }
@@ -43,6 +41,8 @@ async def lookup_contact_by_name(full_name: str):
     
     # CiviCRM REST often expects 'params' as a form field containing JSON
     body = {
+        "api_key": api_key,
+        "key": site_key,
         "params": json.dumps(params)
     }
     
@@ -132,8 +132,6 @@ async def lookup_contact_by_phone(phone_number: str):
     site_key = os.getenv("CIVICRM_SITE_KEY")
     
     headers = {
-        "X-Civi-Auth": f"Bearer {api_key}",
-        "X-Civi-Key": site_key,
         "X-Requested-With": "XMLHttpRequest",
         "Content-Type": "application/x-www-form-urlencoded"
     }
@@ -153,6 +151,8 @@ async def lookup_contact_by_phone(phone_number: str):
     }
     
     body = {
+        "api_key": api_key,
+        "key": site_key,
         "params": json.dumps(params)
     }
     
