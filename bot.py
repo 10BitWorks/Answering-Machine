@@ -47,7 +47,7 @@ app = FastAPI()
 @app.middleware("http")
 async def block_non_twilio_traffic(request: Request, call_next):
     user_agent = request.headers.get("user-agent", "")
-    if request.url.path != "/ws" and "TwilioProxy" not in user_agent:
+    if request.url.path not in ["/ws", "/health"] and "TwilioProxy" not in user_agent:
         return Response(status_code=404)
     return await call_next(request)
 
