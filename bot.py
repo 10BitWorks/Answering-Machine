@@ -213,6 +213,14 @@ async def recording_callback(request: Request):
     payload = {k: v for k, v in form_data.items()}
     call_sid = payload.get("CallSid")
     
+    # If the recording callback is hit, the call is definitively over.
+    # Force cancel the pipeline task if it's still running so the transcript is generated immediately.
+    if call_sid in active_calls and "task" in active_calls[call_sid]:
+        task_to_cancel = active_calls[call_sid]["task"]
+        if task_to_cancel:
+            logger.info(f"Force cancelling pipeline for {call_sid} from recording_callback")
+            asyncio.create_task(task_to_cancel.queue_frames([CancelTaskFrame()]))
+    
     # Wait up to 5 seconds for the pipeline to finish and populate the transcript
     for _ in range(50):
         if call_sid in call_transcripts:
@@ -843,6 +851,10 @@ async def websocket_endpoint(websocket: WebSocket):
         params=PipelineParams(audio_in_sample_rate=8000, audio_out_sample_rate=8000, enable_metrics=True, enable_usage_metrics=True),
         idle_timeout_secs=120.0
     )
+
+    if call_sid in active_calls:
+        active_calls[call_sid]["task"] = task
+
 
     caller_contact_id = None
     caller_recognized_name = None  # CiviCRM first name, set when caller is recognized
