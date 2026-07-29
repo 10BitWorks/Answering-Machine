@@ -213,6 +213,12 @@ async def recording_callback(request: Request):
     payload = {k: v for k, v in form_data.items()}
     call_sid = payload.get("CallSid")
     
+    # Wait up to 5 seconds for the pipeline to finish and populate the transcript
+    for _ in range(50):
+        if call_sid in call_transcripts:
+            break
+        await asyncio.sleep(0.1)
+    
     if call_sid in call_transcripts:
         payload["Transcript"] = call_transcripts.pop(call_sid)
     else:
@@ -832,7 +838,11 @@ async def websocket_endpoint(websocket: WebSocket):
         transport.output()
     ])
 
-    task = PipelineTask(pipeline, params=PipelineParams(audio_in_sample_rate=8000, audio_out_sample_rate=8000, enable_metrics=True, enable_usage_metrics=True))
+    task = PipelineTask(
+        pipeline, 
+        params=PipelineParams(audio_in_sample_rate=8000, audio_out_sample_rate=8000, enable_metrics=True, enable_usage_metrics=True),
+        idle_timeout_secs=120.0
+    )
 
     caller_contact_id = None
     caller_recognized_name = None  # CiviCRM first name, set when caller is recognized
