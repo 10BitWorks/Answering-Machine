@@ -428,20 +428,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 },
                 required=["entity_type", "record_id"]
             ),
-            FunctionSchema(
-                name="ask_support_bot",
-                description="Consult the 10BitWorks support bot for questions you cannot answer from your own knowledge. This AI support agent can search Slack archives for specific answers, but takes some time. Call this tool only when you don't know the answer. The tool will automatically return a 'processing' instruction telling you to stall naturally while it fetches the answer in the background.",
-                properties={
-                    "question": {
-                        "type": "string",
-                        "description": "The message to send to the support bot. The first time you call this tool, mention who you are handling a call from and what was discussed so far. Ask for an unformatted text response within 20 seconds."
-                    }
-                },
-                required=["question"]
-            ),
+#             FunctionSchema(
+#                 name="ask_support_bot",
+#                 description="Consult the 10BitWorks support bot for questions you cannot answer from your own knowledge. This AI support agent can search Slack archives for specific answers, but takes some time. Call this tool only when you don't know the answer. The tool will automatically return a 'processing' instruction telling you to stall naturally while it fetches the answer in the background.",
+#                 properties={
+#                     "question": {
+#                         "type": "string",
+#                         "description": "The message to send to the support bot. The first time you call this tool, mention who you are handling a call from and what was discussed so far. Ask for an unformatted text response within 20 seconds."
+#                     }
+#                 },
+#                 required=["question"]
+#             ),
             FunctionSchema(
                 name="update_call_summary",
-                description="Update the running summary of this phone call, to be displayed in the call history. Only call this tool after each meaningful question is addressed. Include who is calling, what they asked about, what answers were given, and whether their query was fully resolved. If not fully resolved, strongly suggest follow-up by including the caller's number.",
+                description="Update the running summary of this phone call, to be displayed in the call history. Only call this tool after each meaningful question is addressed, and never mention that you are doing it. In your summary, include who is calling, what they asked about, what answers were given, and whether their query was fully resolved. If not fully resolved, strongly suggest follow-up by including the caller's number.",
                 properties={
                     "summary": {
                         "type": "string",
@@ -790,18 +790,18 @@ async def websocket_endpoint(websocket: WebSocket):
             call_logger.debug("ask_support_bot_handler cancelled by interruption, background task survives.")
             pass
 
-    llm.register_function("end_call", hang_up, timeout_secs=5.0)
-    llm.register_function("report_missing_knowledge", notify_slack, timeout_secs=5.0)
-    llm.register_function("transfer_call", transfer_call_handler, timeout_secs=5.0)
-    llm.register_function("lookup_contact", lookup_contact_handler, timeout_secs=5.0)
-    llm.register_function("check_my_membership", get_membership_handler, timeout_secs=5.0)
-    llm.register_function("list_my_contact_info", list_info_handler, timeout_secs=5.0)
-    llm.register_function("add_new_address", add_address_handler, timeout_secs=5.0)
-    llm.register_function("add_new_phone", add_phone_handler, timeout_secs=5.0)
-    llm.register_function("add_new_email", add_email_handler, timeout_secs=5.0)
-    llm.register_function("set_info_as_primary", set_primary_handler, timeout_secs=5.0)
-    llm.register_function("create_my_contact_record", create_contact_handler, timeout_secs=5.0)
-    llm.register_function("ask_support_bot", ask_support_bot_handler, timeout_secs=30.0)
+    llm.register_function("end_call", hang_up, timeout_secs=10.0)
+    llm.register_function("report_missing_knowledge", notify_slack, timeout_secs=2.0)
+    llm.register_function("transfer_call", transfer_call_handler, timeout_secs=10.0)
+    llm.register_function("lookup_contact", lookup_contact_handler, timeout_secs=3.0)
+    llm.register_function("check_my_membership", get_membership_handler, timeout_secs=3.0)
+    llm.register_function("list_my_contact_info", list_info_handler, timeout_secs=3.0)
+    llm.register_function("add_new_address", add_address_handler, timeout_secs=3.0)
+    llm.register_function("add_new_phone", add_phone_handler, timeout_secs=3.0)
+    llm.register_function("add_new_email", add_email_handler, timeout_secs=3.0)
+    llm.register_function("set_info_as_primary", set_primary_handler, timeout_secs=3.0)
+    llm.register_function("create_my_contact_record", create_contact_handler, timeout_secs=3.0)
+    #llm.register_function("ask_support_bot", ask_support_bot_handler, timeout_secs=30.0)
 
     async def update_call_summary_handler(params: FunctionCallParams):
         summary = params.arguments.get("summary", "")
@@ -809,7 +809,7 @@ async def websocket_endpoint(websocket: WebSocket):
         call_logger.info(f"Call summary updated ({len(summary)} chars)")
         await params.result_callback({"status": "ok"})
 
-    llm.register_function("update_call_summary", update_call_summary_handler, timeout_secs=5.0)
+    llm.register_function("update_call_summary", update_call_summary_handler, timeout_secs=0.2)
 
     async def session_warning_task():
         try:
