@@ -156,6 +156,14 @@ async def post_bot(request: Request):
     form_data = await request.form()
     call_sid = form_data.get("CallSid")
     
+    # The media stream is definitively over if post_bot is hit.
+    if call_sid in active_calls and "task" in active_calls[call_sid]:
+        task_to_cancel = active_calls[call_sid]["task"]
+        if task_to_cancel:
+            logger.info(f"Force cancelling pipeline for {call_sid} from post_bot")
+            asyncio.create_task(task_to_cancel.queue_frames([CancelTaskFrame()]))
+            active_calls[call_sid]["task"] = None
+    
     transfer_data = pending_transfers.pop(call_sid, None)
     if transfer_data:
         target_number = transfer_data.get("number")
@@ -220,6 +228,7 @@ async def recording_callback(request: Request):
         if task_to_cancel:
             logger.info(f"Force cancelling pipeline for {call_sid} from recording_callback")
             asyncio.create_task(task_to_cancel.queue_frames([CancelTaskFrame()]))
+            active_calls[call_sid]["task"] = None
     
     # Wait up to 5 seconds for the pipeline to finish and populate the transcript
     for _ in range(50):
