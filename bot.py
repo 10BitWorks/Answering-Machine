@@ -338,7 +338,7 @@ async def websocket_endpoint(websocket: WebSocket):
             ),
             FunctionSchema(
                 name="transfer_call",
-                description="Transfer the current call to another phone number. Use this when the user asks to speak to a person or a specific volunteer.",
+                description="Transfer the current call to another phone number. Use this when the user asks to speak to a specific person. Always wait for the caller's verbal agreement to being transferred before calling the tool.",
                 properties={
                     "phone_number": {
                         "type": "string",
@@ -376,7 +376,7 @@ async def websocket_endpoint(websocket: WebSocket):
             ),
             FunctionSchema(
                 name="create_my_contact_record",
-                description="Creates a new contact record for the current caller in our database. Use this IMMEDIATELY after an unrecognized caller has provided their first and last name, so that we can accurately log their inquiry.",
+                description="Creates a new contact record for the current caller in our database. Use this IMMEDIATELY after an unrecognized caller has provided their first and last name, so that we can accurately log their inquiry. Use your judgement to ensure you've been provided a real name, not unrelated words. If in doubt, confirm with the caller first.",
                 properties={
                     "first_name": {"type": "string", "description": "The caller's first name."},
                     "last_name": {"type": "string", "description": "The caller's last name."}
@@ -441,7 +441,7 @@ async def websocket_endpoint(websocket: WebSocket):
             ),
             FunctionSchema(
                 name="update_call_summary",
-                description="Update the running summary of this phone call, to be displayed in the call history. Only call this tool after each meaningful question is addressed. Include who is calling, what they asked about, what answers were given, and whether their query was fully resolved. If not fully resolved, suggest follow-up by including the caller's number.",
+                description="Update the running summary of this phone call, to be displayed in the call history. Only call this tool after each meaningful question is addressed. Include who is calling, what they asked about, what answers were given, and whether their query was fully resolved. If not fully resolved, strongly suggest follow-up by including the caller's number.",
                 properties={
                     "summary": {
                         "type": "string",
