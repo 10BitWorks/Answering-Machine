@@ -528,7 +528,7 @@ async def websocket_endpoint(websocket: WebSocket):
 #             ),
             FunctionSchema(
                 name="update_call_summary",
-                description="Update the running summary of this phone call, to be displayed in the call history. Only call this tool after each meaningful question is addressed, and never mention that you are doing it. In your summary, include who is calling, what they asked about, what answers were given, and whether their query was fully resolved. If not fully resolved, strongly suggest follow-up by including the caller's number.",
+                description="Update the running summary of this phone call, to be displayed in the call history. Only call this tool after each meaningful question is addressed, but never mention that you are doing it. In your summary, include who is calling, what they asked about, what answers were given, and whether their query was fully resolved. If not fully resolved, strongly suggest follow-up by including the caller's number.",
                 properties={
                     "summary": {
                         "type": "string",
@@ -615,7 +615,7 @@ async def websocket_endpoint(websocket: WebSocket):
             is_terminating = True
             asyncio.create_task(wait_and_terminate())
         # Return success immediately so the bot can say its final goodbye turn
-        return {"status": "hangup_initiated", "instruction": "You are now hanging up. Say a brief and polite goodbye to the user now before the connection is severed."}
+        return {"status": "hangup_initiated", "instruction": "You are now hanging up. Say a brief and polite goodbye to the user now before the connection is severed. Be sure to end with the tagline: Come and Make It!"}
 
     async def notify_slack(params: FunctionCallParams):
         observation = params.arguments.get("observation")
@@ -884,6 +884,7 @@ async def websocket_endpoint(websocket: WebSocket):
     warning_task = asyncio.create_task(session_warning_task())
 
     context = LLMContext()
+    speech_tracker.context = context
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(context)
 
     pipeline = Pipeline([
@@ -947,16 +948,17 @@ async def websocket_endpoint(websocket: WebSocket):
             detail_block = f"CURRENT CALLER INFO: Recognized as {name} (ID: {caller_contact_id}).\n\n{membership}\n\n{contact_details}"
             greeting = f"'You've reached the answering machine for 10BitWorks, San Antonio's largest member-supported makerspace! How can I help you today, {name}?'"
 
-        # Start live Slack tracking session
+        # Start live Slack tracking session with CNAM data only for top Card block
         asyncio.create_task(start_live_call_slack_session(
             call_sid,
-            caller_display_name,
+            caller_name,
             caller_number,
             crm_url,
             context=context,
             speech_tracker=speech_tracker,
             caller_location=caller_location
         ))
+
 
 
 

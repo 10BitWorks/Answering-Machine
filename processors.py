@@ -16,11 +16,12 @@ class SpeechTracker(FrameProcessor):
     VAD status, chronologically recording call history transcripts, and
     structuring turn tasks for real-time Slack updates.
     """
-    def __init__(self, call_history: list = None, on_turn_update = None):
+    def __init__(self, call_history: list = None, context = None, on_turn_update = None):
         super().__init__()
         self.is_speaking = False
         self.first_utterance_finished = False
         self.call_history = call_history if call_history is not None else []
+        self.context = context
         self.tasks = []  # List of turn dicts for Slack plan block schema
         self.on_turn_update = on_turn_update
         self.current_task = None
@@ -103,6 +104,14 @@ class SpeechTracker(FrameProcessor):
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
+        
+        # Continuously sync from context if context reference exists
+        if self.context and hasattr(self.context, "messages"):
+            old_task_count = len(self.tasks)
+            self.sync_from_context(self.context.messages)
+            if len(self.tasks) != old_task_count:
+                await self._trigger_update()
+
         if isinstance(frame, BotStartedSpeakingFrame):
             self.is_speaking = True
         elif isinstance(frame, BotStoppedSpeakingFrame):
