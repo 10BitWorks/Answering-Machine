@@ -189,7 +189,7 @@ def build_during_call_blocks(call_sid: str, cnam_name: str, summary: str, tasks:
     ]
     return blocks
 
-def build_after_call_blocks(call_sid: str, cnam_name: str, duration_str: str, summary: str, tasks: list, sources: list = None, caller_number: str = None, caller_location: str = None, call_cost: str = "$0.033", ai_cost: str = "$0.0389") -> list[dict]:
+def build_after_call_blocks(call_sid: str, cnam_name: str, duration_str: str, summary: str, tasks: list, sources: list = None, caller_number: str = None, caller_location: str = None, call_cost: str = "", ai_cost: str = "") -> list[dict]:
     """
     Builds Slack Block Kit payload matching after-call-example.json layout:
     1. Card block with title (CNAM name only), subtitle (formatted phone & location), and mobile icon
@@ -254,12 +254,12 @@ def build_after_call_blocks(call_sid: str, cnam_name: str, duration_str: str, su
     }
 
     try:
-        c_val = float(call_cost.replace("$", "")) if "$" in call_cost else 0.033
-        a_val = float(ai_cost.replace("$", "")) if "$" in ai_cost else 0.0389
+        c_val = float(call_cost.replace("$", "")) if "$" in call_cost else 0.000
+        a_val = float(ai_cost.replace("$", "")) if "$" in ai_cost else 0.000
         total_val = c_val + 0.0100 + a_val
         total_cost_str = f"${total_val:.4f}"
     except Exception:
-        total_cost_str = "$0.0819"
+        total_cost_str = "$0.00"
 
     details_container = {
         "type": "container",
@@ -290,7 +290,7 @@ def build_after_call_blocks(call_sid: str, cnam_name: str, duration_str: str, su
                     ],
                     [
                         build_rich_text_object(call_cost),
-                        build_rich_text_object("$0.0100"),
+                        build_rich_text_object("$0.01"),
                         build_rich_text_object(ai_cost),
                         build_rich_text_object(total_cost_str)
                     ]
@@ -512,6 +512,7 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list = None):
             # 2. Download audio file from Twilio
             audio_bytes = None
             if raw_recording_url:
+                logger.info(f"Downloading Twilio recording for call {call_sid} from URL: {raw_recording_url}")
                 try:
                     account_sid = os.getenv("TWILIO_ACCOUNT_SID")
                     auth_token = os.getenv("TWILIO_AUTH_TOKEN")
@@ -526,15 +527,25 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list = None):
                     if rec_res.status_code in (301, 302, 303, 307):
                         redirect_url = rec_res.headers.get("Location") or rec_res.headers.get("location")
                         if redirect_url:
-                            s3_res = await client.get(redirect_url, follow_redirects=True)
-                            if s3_res.status_code == 200:
-                                audio_bytes = s3_res.content
+                            # Use clean unauthenticated client for S3 presigned URL to prevent Basic Auth header collisions
+                            async with httpx.AsyncClient(timeout=30.0) as s3_client:
+                                s3_res = await s3_client.get(redirect_url, follow_redirects=True)
+                                if s3_res.status_code == 200:
+                                    audio_bytes = s3_res.content
+                                    logger.info(f"Successfully downloaded audio bytes ({len(audio_bytes)} bytes) from S3 for call {call_sid}")
+                                else:
+                                    logger.error(f"S3 download failed for call {call_sid} with status {s3_res.status_code}: {s3_res.text[:200]}")
+                        else:
+                            logger.error(f"Twilio recording redirect missing Location header for call {call_sid}")
                     elif rec_res.status_code == 200:
                         audio_bytes = rec_res.content
+                        logger.info(f"Successfully downloaded audio bytes ({len(audio_bytes)} bytes) directly for call {call_sid}")
                     else:
-                        logger.warning(f"Twilio recording download returned HTTP {rec_res.status_code}")
+                        logger.error(f"Twilio recording download returned HTTP {rec_res.status_code} for call {call_sid}: {rec_res.text[:200]}")
                 except Exception as e:
-                    logger.error(f"Error downloading Twilio audio: {e}")
+                    logger.error(f"Error downloading Twilio audio for call {call_sid}: {e}")
+            else:
+                logger.warning(f"No RecordingUrl provided in callback payload for call {call_sid}; skipping audio attachment.")
 
             # 3. Upload audio file directly into main Slack channel
             if audio_bytes:
@@ -576,9 +587,15 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list = None):
                             if comp_data.get("ok"):
                                 logger.info(f"Successfully uploaded audio recording to Slack channel for call {call_sid}")
                             else:
-                                logger.error(f"files.completeUploadExternal failed: {comp_data}")
+                                logger.error(f"files.completeUploadExternal failed for call {call_sid}: {comp_data}")
+                        else:
+                            logger.error(f"Upload to Slack binary endpoint failed for call {call_sid} (HTTP {upload_res.status_code}): {upload_res.text[:200]}")
+                    else:
+                        logger.error(f"files.getUploadURLExternal failed for call {call_sid}: {get_url_data}")
                 except Exception as e:
-                    logger.error(f"Error uploading audio file to Slack: {e}")
+                    logger.error(f"Error uploading audio file to Slack for call {call_sid}: {e}")
+            else:
+                logger.error(f"Audio bytes missing or download failed for call {call_sid}; skipping Slack file upload.")
 
         active_slack_sessions.pop(call_sid, None)
         return
