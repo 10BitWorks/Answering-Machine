@@ -91,3 +91,26 @@ I will modify the SYSTEM_PROMPT file myself. You may suggest, but don't touch it
 
 ## 11. Pipecat Parameter Renames
 *   **`audio_out_auto_silence`**: In Pipecat 1.5.0, the parameter `audio_out_can_send_silence` was renamed to `audio_out_auto_silence` in `FastAPIWebsocketParams`. Using the old name silently falls back to the default (`True`), which causes audio dropouts. Always use `audio_out_auto_silence=False`.
+
+## 12. Transcript Ordering and VAD Limitations
+*   **No Turn Frames**: Gemini 3.1 Live does not emit `UserStoppedSpeakingFrame` (VAD turn frames). As a result, Pipecat's `LLMUserContextAggregator` falls back to realtime mode and drops its turn strategies, meaning `context.messages` gets populated arbitrarily and out-of-order during interruptions.
+*   **Chronological Tracking**: To capture the exact chronological ordering of live speech, a custom `SpeechTracker` MUST intercept `TranscriptionFrame`s **UPSTREAM** (before the aggregator consumes them) and `BotStartedSpeakingFrame`s **DOWNSTREAM**. If the tracker is placed at the bottom of the pipeline, it will miss the upstream user transcriptions entirely.
+
+## 13. The Webhook Race Condition
+*   **Twilio vs. Pipecat Teardown**: When a caller hangs up abruptly (especially while the bot is speaking), Twilio immediately fires the `/post_bot` and `/recording-callback` webhooks. However, Pipecat may not catch the disconnect immediately and will stay alive until the 120s `idle_timeout`.
+*   **The Fix**: If the `/recording-callback` webhook fires and tries to fetch the transcript while Pipecat is still alive, it will send an empty transcript. The webhook endpoints must manually pop the `task` from the `active_calls` dictionary and inject a `CancelTaskFrame()` to force Pipecat to tear down instantly and flush the transcripts.
+
+## 14. Negative Rule Inversion (The "Safe Assumptions" Loophole)
+*   **Eager to Please**: Because LLMs are eager predictive text engines, providing strict negative instructions with specific conditions (e.g., "If X is atypical, assume we don't have it") will often be logically inverted by the LLM ("Since X IS typical, I CAN assume we DO have it!").
+*   **Cascading Hallucinations**: Once the LLM assumes a craft exists (e.g., "painting"), it will confidently hallucinate the standard equipment for that craft (e.g., "ventilated spray booth"). Negative constraints must be absolute (e.g., "Never assume we have it, even if it is typical").
+
+## 15. The Interruption Resumption Quirk
+*   **Stubborn Resumption**: If the bot goes on a tangent (e.g., selling the caller on an unrelated feature from the KB) and the user interrupts with a noise (like "Ah!"), the LLM will often stubbornly resume and finish its interrupted sentence rather than acknowledging the context of the user's interruption. Prompt engineering must forbid the bot from listing random unprompted features.
+
+## 16. Parallel Tool Call Hallucinations
+*   **Asking and Executing Simultaneously**: Gemini Live will sometimes decide to ask a clarification question (e.g., "Would you like me to transfer you to Beans?") and *simultaneously* emit the state-mutating tool (`transfer_call`) in the exact same generation step!
+*   **The Fix**: Tools that mutate state MUST have explicit instructions forbidding them from being called in the same turn as offering the action (e.g., "You must wait for their 'yes' or 'no' response in a separate conversational turn BEFORE calling this tool").
+
+## 17. Tool Call Leaks in Speech
+*   **Internal Reasoning Leak**: Because Gemini Live is a unified audio model, it sometimes leaks internal function call reasoning (e.g., reciting `response:ask_support_bot{result:...}`) into its spoken `TextFrame` output stream if a tool fails or if it decides to simulate a tool response.
+*   **The Fix**: The raw text stream within the `SpeechTracker` must be scrubbed of these regex patterns before final transcript logging.
