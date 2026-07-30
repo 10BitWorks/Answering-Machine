@@ -80,7 +80,7 @@ async def fetch_twilio_call_cost(call_sid: str, duration_secs: int = 0) -> str:
     est_price = (mins * 0.0085) + 0.0050
     return f"${est_price:.3f}"
 
-def build_card_block(cnam_name: str, caller_number: str = None, caller_location: str = None) -> dict:
+def build_card_block(cnam_name: str, caller_number: str = None, caller_location: str = None, call_sid: str = None) -> dict:
     """
     Builds Card block containing ONLY CNAM data (not CiviCRM data).
     Uses natural US phone formatting: (848) 218-0683.
@@ -96,7 +96,7 @@ def build_card_block(cnam_name: str, caller_number: str = None, caller_location:
         
     subtitle_text = " ".join(subtitle_parts) if subtitle_parts else "Incoming Telephony Call"
 
-    return {
+    card = {
         "type": "card",
         "slack_icon": {
             "type": "icon",
@@ -113,12 +113,15 @@ def build_card_block(cnam_name: str, caller_number: str = None, caller_location:
             "verbatim": False
         }
     }
+    if call_sid:
+        card["block_id"] = f"card_block_{call_sid}"
+    return card
 
 def build_during_call_blocks(call_sid: str, cnam_name: str, summary: str, tasks: list, sources: list = None, caller_number: str = None, caller_location: str = None) -> list[dict]:
     """
     Builds Slack Block Kit payload matching during-call layout with CNAM Card header.
     """
-    card_block = build_card_block(cnam_name, caller_number=caller_number, caller_location=caller_location)
+    card_block = build_card_block(cnam_name, caller_number=caller_number, caller_location=caller_location, call_sid=call_sid)
 
     plan_tasks = []
     for idx, t in enumerate(tasks, 1):
@@ -148,7 +151,7 @@ def build_during_call_blocks(call_sid: str, cnam_name: str, summary: str, tasks:
     # Append pending task if last task is complete
     if not plan_tasks or plan_tasks[-1].get("status") == "complete":
         plan_tasks.append({
-            "task_id": f"task_{len(plan_tasks)+1}_bkb",
+            "task_id": f"task_pending_{call_sid}",
             "title": "Listening for next response...",
             "status": "pending"
         })
@@ -159,6 +162,7 @@ def build_during_call_blocks(call_sid: str, cnam_name: str, summary: str, tasks:
         card_block,
         {
             "type": "context",
+            "block_id": f"context_block_{call_sid}",
             "elements": [
                 {
                     "type": "mrkdwn",
@@ -168,13 +172,15 @@ def build_during_call_blocks(call_sid: str, cnam_name: str, summary: str, tasks:
         },
         {
             "type": "plan",
+            "block_id": f"plan_block_{call_sid}",
             "plan_id": f"plan_{call_sid}",
             "title": f"Handling incoming call from {card_block['title']['text']}",
             "tasks": plan_tasks
         },
         {
-            "dispatch_action": True,
             "type": "input",
+            "block_id": f"input_block_{call_sid}",
+            "dispatch_action": True,
             "element": {
                 "type": "plain_text_input",
                 "action_id": "plain_text_input-action"
@@ -197,7 +203,7 @@ def build_after_call_blocks(call_sid: str, cnam_name: str, duration_str: str, su
     3. Context block with summary text
     4. Container block (collapsible Call Details with API Cost table)
     """
-    card_block = build_card_block(cnam_name, caller_number=caller_number, caller_location=caller_location)
+    card_block = build_card_block(cnam_name, caller_number=caller_number, caller_location=caller_location, call_sid=call_sid)
 
     plan_tasks = []
     for idx, t in enumerate(tasks, 1):
@@ -226,7 +232,7 @@ def build_after_call_blocks(call_sid: str, cnam_name: str, duration_str: str, su
     # Fallback task if no tasks were recorded
     if not plan_tasks:
         plan_tasks.append({
-            "task_id": "task_1",
+            "task_id": f"task_1_{call_sid}",
             "title": "Call conversation completed",
             "status": "complete",
             "details": build_rich_text_object("Gracefully ended call")
@@ -238,6 +244,7 @@ def build_after_call_blocks(call_sid: str, cnam_name: str, duration_str: str, su
 
     plan_block = {
         "type": "plan",
+        "block_id": f"plan_block_{call_sid}",
         "plan_id": f"plan_{call_sid}",
         "title": title_text,
         "tasks": plan_tasks
@@ -245,6 +252,7 @@ def build_after_call_blocks(call_sid: str, cnam_name: str, duration_str: str, su
 
     context_block = {
         "type": "context",
+        "block_id": f"context_block_{call_sid}",
         "elements": [
             {
                 "type": "mrkdwn",
@@ -252,6 +260,7 @@ def build_after_call_blocks(call_sid: str, cnam_name: str, duration_str: str, su
             }
         ]
     }
+
 
     try:
         c_val = float(call_cost.replace("$", "")) if "$" in call_cost else 0.000
