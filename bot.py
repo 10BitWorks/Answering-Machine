@@ -310,19 +310,26 @@ async def slack_interactivity(request: Request):
                     
                     logger.info(f"Received operator steering hint for call {call_sid}: {hint_text}")
                     
-                    if speech_tracker:
-                        speech_tracker.add_task_detail(f"Operator hint: {hint_text}")
-                        
-                    if context:
-                        if speech_tracker and speech_tracker.is_speaking:
-                            await asyncio.sleep(0.5)
-                        context.add_message({
-                            "role": "developer",
-                            "content": f"INSTRUCTION FROM OPERATOR: {hint_text}"
-                        })
-                        logger.info(f"Injected operator hint into LLM context for call {call_sid}")
+                    async def _inject_hint_async():
+                        if speech_tracker:
+                            speech_tracker.add_task_detail(f"Operator hint: {hint_text}")
+                        if context:
+                            if speech_tracker and speech_tracker.is_speaking:
+                                await asyncio.sleep(0.5)
+                            context.add_message({
+                                "role": "developer",
+                                "content": f"INSTRUCTION FROM OPERATOR: {hint_text}"
+                            })
+                            logger.info(f"Injected operator hint into LLM context for call {call_sid}")
+                            
+                            # Force turn sync and Slack update
+                            if speech_tracker and hasattr(context, "messages"):
+                                speech_tracker.sync_from_context(context.messages)
+
+                    asyncio.create_task(_inject_hint_async())
                         
     return Response(status_code=200)
+
 
 
 
@@ -362,12 +369,12 @@ async def websocket_endpoint(websocket: WebSocket):
     caller_number = call_data.get("body", {}).get("caller_number", "Unknown Caller")
     destination_number = call_data.get("body", {}).get("destination_number", "Unknown")
     caller_name = call_data.get("body", {}).get("caller_name", "")
-    # Title-case CNAM (arrives as ALL CAPS like "DAVID BLUM") and extract first name
-    if caller_name:
-        caller_name = caller_name.strip().title()
-        caller_first_name = caller_name.split()[0] if caller_name.split() else caller_name
-    else:
-        caller_first_name = ""
+    caller_city = call_data.get("body", {}).get("caller_city", "")
+    caller_state = call_data.get("body", {}).get("caller_state", "")
+    caller_zip = call_data.get("body", {}).get("caller_zip", "")
+    loc_parts = [p for p in [caller_city, f"{caller_state} {caller_zip}".strip()] if p]
+    caller_location = ", ".join(loc_parts) if loc_parts else None
+
 
     # Store active call info for CTI updates during transfer
     active_calls[call_sid] = {
@@ -941,7 +948,16 @@ async def websocket_endpoint(websocket: WebSocket):
             greeting = f"'You've reached the answering machine for 10BitWorks, San Antonio's largest member-supported makerspace! How can I help you today, {name}?'"
 
         # Start live Slack tracking session
-        asyncio.create_task(start_live_call_slack_session(call_sid, caller_display_name, caller_number, crm_url, context=context, speech_tracker=speech_tracker))
+        asyncio.create_task(start_live_call_slack_session(
+            call_sid,
+            caller_display_name,
+            caller_number,
+            crm_url,
+            context=context,
+            speech_tracker=speech_tracker,
+            caller_location=caller_location
+        ))
+
 
 
         # Determine the recipient label for Zammad CTI

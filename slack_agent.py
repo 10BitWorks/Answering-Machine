@@ -4,7 +4,7 @@ import time
 import httpx
 from loguru import logger
 
-# Active Slack sessions store: {call_sid: {"ts": str, "channel": str, "last_update": float, "caller_name": str, "crm_url": str, "summary": str, "tasks": list, "context": object, "speech_tracker": object}}
+# Active Slack sessions store: {call_sid: {"ts": str, "channel": str, "last_update": float, "caller_name": str, "caller_number": str, "caller_location": str, "crm_url": str, "summary": str, "tasks": list, "context": object, "speech_tracker": object}}
 active_slack_sessions = {}
 
 def get_slack_session_by_ts(ts: str) -> dict:
@@ -41,12 +41,58 @@ def build_rich_text_object(text: str) -> dict:
         ]
     }
 
-def build_during_call_blocks(call_sid: str, caller_name: str, summary: str, tasks: list, sources: list = None) -> list[dict]:
+async def fetch_twilio_call_cost(call_sid: str) -> str:
+    """Fetches the actual call price from Twilio REST API."""
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+    if not (account_sid and auth_token and call_sid and call_sid != "unknown"):
+        return "$0.0137"
+
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Calls/{call_sid}.json"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            res = await client.get(url, auth=(account_sid, auth_token))
+            if res.status_code == 200:
+                data = res.json()
+                price_raw = data.get("price")
+                if price_raw:
+                    val = abs(float(price_raw))
+                    return f"${val:.3f}"
+    except Exception as e:
+        logger.error(f"Error fetching Twilio call cost for {call_sid}: {e}")
+    return "$0.0137"
+
+def build_during_call_blocks(call_sid: str, caller_name: str, summary: str, tasks: list, sources: list = None, caller_number: str = None, caller_location: str = None) -> list[dict]:
     """
-    Builds Slack Block Kit payload matching during-call-example.json layout.
+    Builds Slack Block Kit payload matching during-call layout with Card header.
     """
+    card_title = caller_name if caller_name else (caller_number or "Incoming Call")
+    subtitle_parts = []
+    if caller_number:
+        subtitle_parts.append(caller_number)
+    if caller_location:
+        subtitle_parts.append(f"⬢ {caller_location}")
+    subtitle_text = " ".join(subtitle_parts) if subtitle_parts else "Incoming Telephony Call"
+
+    card_block = {
+        "type": "card",
+        "slack_icon": {
+            "type": "icon",
+            "name": "mobile"
+        },
+        "title": {
+            "type": "mrkdwn",
+            "text": card_title,
+            "verbatim": False
+        },
+        "subtitle": {
+            "type": "mrkdwn",
+            "text": subtitle_text,
+            "verbatim": False
+        }
+    }
+
     plan_tasks = []
-    
     for idx, t in enumerate(tasks, 1):
         task_id = t.get("task_id", f"task_{idx}")
         title = t.get("title", f"Turn {idx}")
@@ -79,9 +125,10 @@ def build_during_call_blocks(call_sid: str, caller_name: str, summary: str, task
             "status": "pending"
         })
 
-    summary_text = summary if summary else f"Incoming call in progress from *{caller_name}*..."
+    summary_text = summary if summary else f"Incoming call in progress from *{card_title}*..."
     
     blocks = [
+        card_block,
         {
             "type": "context",
             "elements": [
@@ -94,7 +141,7 @@ def build_during_call_blocks(call_sid: str, caller_name: str, summary: str, task
         {
             "type": "plan",
             "plan_id": f"plan_{call_sid}",
-            "title": f"Handling incoming call from {caller_name}",
+            "title": f"Handling incoming call from {card_title}",
             "tasks": plan_tasks
         },
         {
@@ -114,7 +161,7 @@ def build_during_call_blocks(call_sid: str, caller_name: str, summary: str, task
     ]
     return blocks
 
-def build_after_call_blocks(call_sid: str, caller_name: str, duration_str: str, summary: str, tasks: list, sources: list = None, caller_number: str = None, caller_location: str = None) -> list[dict]:
+def build_after_call_blocks(call_sid: str, caller_name: str, duration_str: str, summary: str, tasks: list, sources: list = None, caller_number: str = None, caller_location: str = None, call_cost: str = "$0.0137", ai_cost: str = "$0.0389") -> list[dict]:
     """
     Builds Slack Block Kit payload matching updated after-call-example.json layout:
     1. Card block with title (caller name), subtitle (phone & location), and mobile icon
@@ -181,8 +228,8 @@ def build_after_call_blocks(call_sid: str, caller_name: str, duration_str: str, 
             "details": build_rich_text_object("Gracefully ended call")
         })
 
-    summary_text = summary if summary else f"Call completed with *{caller_name}*."
-    title_text = f"{duration_str} call from {caller_name}" if duration_str else f"Call from {caller_name}"
+    summary_text = summary if summary else f"Call completed with *{card_title}*."
+    title_text = f"{duration_str} call from {card_title}" if duration_str else f"Call from {card_title}"
 
     plan_block = {
         "type": "plan",
@@ -200,6 +247,14 @@ def build_after_call_blocks(call_sid: str, caller_name: str, duration_str: str, 
             }
         ]
     }
+
+    try:
+        c_val = float(call_cost.replace("$", "")) if "$" in call_cost else 0.0137
+        a_val = float(ai_cost.replace("$", "")) if "$" in ai_cost else 0.0389
+        total_val = c_val + 0.0100 + a_val
+        total_cost_str = f"${total_val:.4f}"
+    except Exception:
+        total_cost_str = "$0.0592"
 
     details_container = {
         "type": "container",
@@ -229,10 +284,10 @@ def build_after_call_blocks(call_sid: str, caller_name: str, duration_str: str, 
                         build_rich_text_object("Total")
                     ],
                     [
-                        build_rich_text_object("$0.0137"),
+                        build_rich_text_object(call_cost),
                         build_rich_text_object("$0.0100"),
-                        build_rich_text_object("$0.0389"),
-                        build_rich_text_object("$0.0592")
+                        build_rich_text_object(ai_cost),
+                        build_rich_text_object(total_cost_str)
                     ]
                 ]
             }
@@ -243,8 +298,7 @@ def build_after_call_blocks(call_sid: str, caller_name: str, duration_str: str, 
     return blocks
 
 
-
-async def start_live_call_slack_session(call_sid: str, caller_name: str, caller_number: str, crm_url: str = None, context=None, speech_tracker=None) -> str:
+async def start_live_call_slack_session(call_sid: str, caller_name: str, caller_number: str, crm_url: str = None, context=None, speech_tracker=None, caller_location: str = None) -> str:
     """
     Posts the initial 'during call' Slack Block Kit message when a call connects.
     """
@@ -256,7 +310,7 @@ async def start_live_call_slack_session(call_sid: str, caller_name: str, caller_
 
     sources = [{"type": "url", "url": crm_url, "text": f"CiviCRM contact ({caller_name})"}] if crm_url else None
     display_name = caller_name if caller_name else caller_number
-    blocks = build_during_call_blocks(call_sid, display_name, "", [], sources=sources)
+    blocks = build_during_call_blocks(call_sid, display_name, "", [], sources=sources, caller_number=caller_number, caller_location=caller_location)
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         headers = {"Authorization": f"Bearer {slack_token}"}
@@ -278,6 +332,8 @@ async def start_live_call_slack_session(call_sid: str, caller_name: str, caller_
                     "channel": channel_id,
                     "last_update": time.time(),
                     "caller_name": display_name,
+                    "caller_number": caller_number,
+                    "caller_location": caller_location,
                     "crm_url": crm_url,
                     "summary": "",
                     "tasks": [],
@@ -293,7 +349,7 @@ async def start_live_call_slack_session(call_sid: str, caller_name: str, caller_
     return None
 
 
-async def update_live_call_slack_session(call_sid: str, caller_name: str, summary: str, tasks: list, crm_url: str = None):
+async def update_live_call_slack_session(call_sid: str, caller_name: str, summary: str, tasks: list, crm_url: str = None, caller_number: str = None, caller_location: str = None):
     """
     Updates the existing live call Slack message using chat.update. Enforces rate-limiting.
     """
@@ -312,6 +368,10 @@ async def update_live_call_slack_session(call_sid: str, caller_name: str, summar
         session["tasks"] = tasks
     if caller_name:
         session["caller_name"] = caller_name
+    if caller_number:
+        session["caller_number"] = caller_number
+    if caller_location:
+        session["caller_location"] = caller_location
     if crm_url:
         session["crm_url"] = crm_url
 
@@ -322,13 +382,15 @@ async def update_live_call_slack_session(call_sid: str, caller_name: str, summar
     session["last_update"] = now
 
     display_name = session.get("caller_name") or caller_name or "Caller"
+    c_number = session.get("caller_number") or caller_number
+    c_loc = session.get("caller_location") or caller_location
     url = session.get("crm_url") or crm_url
     current_summary = session.get("summary") or summary
     current_tasks = session.get("tasks") or tasks
 
     sources = [{"type": "url", "url": url, "text": f"CiviCRM contact ({display_name})"}] if url else None
 
-    blocks = build_during_call_blocks(call_sid, display_name, current_summary, current_tasks, sources=sources)
+    blocks = build_during_call_blocks(call_sid, display_name, current_summary, current_tasks, sources=sources, caller_number=c_number, caller_location=c_loc)
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         headers = {"Authorization": f"Bearer {slack_token}"}
@@ -379,11 +441,15 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list = None):
     summary = summary_from_payload or (session.get("summary") if session else "")
     final_tasks = tasks or (session.get("tasks") if session else []) or []
 
+    caller_number = (session.get("caller_number") if session else None) or caller
     caller_city = payload.get("CallerCity", "")
     caller_state = payload.get("CallerState", "")
     caller_zip = payload.get("CallerZip", "")
     loc_parts = [p for p in [caller_city, f"{caller_state} {caller_zip}".strip()] if p]
-    caller_location = ", ".join(loc_parts) if loc_parts else None
+    caller_location = ", ".join(loc_parts) if loc_parts else (session.get("caller_location") if session else None)
+
+    # Fetch actual call cost from Twilio REST API
+    call_cost = await fetch_twilio_call_cost(call_sid)
 
     sources = [{"type": "url", "url": crm_url, "text": f"CiviCRM contact ({caller_name})"}] if crm_url else None
 
@@ -394,10 +460,10 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list = None):
         summary,
         final_tasks,
         sources=sources,
-        caller_number=caller,
-        caller_location=caller_location
+        caller_number=caller_number,
+        caller_location=caller_location,
+        call_cost=call_cost
     )
-
 
     if slack_token and channel_id:
         async with httpx.AsyncClient(timeout=30.0) as client:
