@@ -575,7 +575,7 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list = None):
                             if comp_data.get("ok"):
                                 logger.info(f"Successfully completed Slack audio file upload for call {call_sid}")
                                 
-                                # Extract file_share_ts
+                                # Extract file_share_ts directly from response or by polling files.info
                                 file_share_ts = None
                                 files_arr = comp_data.get("files") or []
                                 if files_arr:
@@ -587,24 +587,31 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list = None):
                                             file_share_ts = chans[channel_id][0].get("ts")
                                             break
 
-                                # Fallback: query files.info if ts not in completion response
+                                # Polling files.info fallback: Slack async post processing may take a short moment to publish shares
                                 if not file_share_ts and file_id:
-                                    try:
-                                        info_res = await client.post(
-                                            "https://slack.com/api/files.info",
-                                            headers=headers,
-                                            data={"file": file_id}
-                                        )
-                                        info_data = info_res.json()
-                                        if info_data.get("ok"):
-                                            shares = info_data.get("file", {}).get("shares", {})
-                                            for share_type in ("public", "private"):
-                                                chans = shares.get(share_type, {})
-                                                if channel_id in chans and chans[channel_id]:
-                                                    file_share_ts = chans[channel_id][0].get("ts")
+                                    for attempt in range(4):
+                                        await asyncio.sleep(0.5)
+                                        try:
+                                            info_res = await client.post(
+                                                "https://slack.com/api/files.info",
+                                                headers=headers,
+                                                data={"file": file_id}
+                                            )
+                                            info_data = info_res.json()
+                                            if info_data.get("ok"):
+                                                shares = info_data.get("file", {}).get("shares", {})
+                                                for share_type in ("public", "private"):
+                                                    chans = shares.get(share_type, {})
+                                                    if channel_id in chans and chans[channel_id]:
+                                                        file_share_ts = chans[channel_id][0].get("ts")
+                                                        break
+                                                if file_share_ts:
+                                                    logger.info(f"files.info polling attempt {attempt+1} retrieved file_share_ts {file_share_ts} for call {call_sid}")
                                                     break
-                                    except Exception as e:
-                                        logger.error(f"files.info fallback failed for call {call_sid}: {e}")
+                                            else:
+                                                logger.warning(f"files.info attempt {attempt+1} returned error: {info_data.get('error')}")
+                                        except Exception as e:
+                                            logger.error(f"files.info polling attempt {attempt+1} failed for call {call_sid}: {e}")
 
                                 if file_share_ts:
                                     logger.info(f"Extracted file_share_ts {file_share_ts} for call {call_sid}. Attempting chat.update with Block Kit blocks...")
@@ -641,17 +648,7 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list = None):
 
                                     recording_uploaded = True
                                 else:
-                                    logger.warning(f"Could not extract file_share_ts for call {call_sid}; initial_comment share was posted.")
-                                    if thread_ts:
-                                        try:
-                                            await client.post(
-                                                "https://slack.com/api/chat.delete",
-                                                headers=headers,
-                                                data={"channel": channel_id, "ts": thread_ts}
-                                            )
-                                        except Exception:
-                                            pass
-                                    recording_uploaded = True
+                                    logger.warning(f"Could not extract file_share_ts for call {call_sid}; preserving live tracking message as fallback.")
                             else:
                                 logger.error(f"files.completeUploadExternal failed for call {call_sid}: {comp_data}")
                         else:
