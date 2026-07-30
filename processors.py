@@ -34,6 +34,64 @@ class SpeechTracker(FrameProcessor):
         if self.on_turn_update:
             asyncio.create_task(self._trigger_update())
 
+    def sync_from_context(self, context_messages: list):
+        """
+        Reconciles tasks list from LLM context messages to ensure turns
+        are accurately captured even if standalone TranscriptionFrames are missing.
+        """
+        user_turns = []
+        current_user_msg = None
+        
+        for msg in context_messages:
+            role = msg.get("role")
+            content = str(msg.get("content") or "").strip()
+            
+            # Skip system/developer messages and operator instructions
+            if role == "developer" or content.startswith("SYSTEM INFO:") or content.startswith("INSTRUCTION:"):
+                continue
+                
+            if role == "user":
+                if current_user_msg:
+                    user_turns.append(current_user_msg)
+                current_user_msg = {
+                    "title": content,
+                    "output_text": "",
+                    "details_text": "",
+                    "status": "in_progress"
+                }
+            elif role == "assistant" and current_user_msg:
+                current_user_msg["output_text"] = content
+                current_user_msg["status"] = "complete"
+                user_turns.append(current_user_msg)
+                current_user_msg = None
+                
+        if current_user_msg:
+            user_turns.append(current_user_msg)
+
+        if not user_turns:
+            return
+
+        # Update tasks while preserving task_ids and details_text
+        new_tasks = []
+        for idx, turn in enumerate(user_turns, 1):
+            task_id = f"task_{idx}"
+            existing_detail = ""
+            if idx - 1 < len(self.tasks):
+                existing_detail = self.tasks[idx - 1].get("details_text", "")
+                
+            new_task = {
+                "task_id": task_id,
+                "title": turn["title"],
+                "status": turn["status"],
+                "output_text": turn["output_text"],
+                "details_text": existing_detail or turn["details_text"]
+            }
+            new_tasks.append(new_task)
+            
+        self.tasks = new_tasks
+        if self.tasks:
+            self.current_task = self.tasks[-1]
+
     async def _trigger_update(self):
         if self.on_turn_update:
             try:
@@ -79,13 +137,10 @@ class SpeechTracker(FrameProcessor):
                 self.current_task["output_text"] = text
                 await self._trigger_update()
         elif isinstance(frame, LLMContextFrame):
-            for msg in reversed(frame.context.messages):
-                if msg.get("role") == "assistant" and msg.get("content"):
-                    bot_text = str(msg["content"]).strip()
-                    if self.current_task and not self.current_task.get("output_text"):
-                        self.current_task["output_text"] = bot_text
-                        await self._trigger_update()
-                    break
+            if frame.context and frame.context.messages:
+                self.sync_from_context(frame.context.messages)
+                await self._trigger_update()
+
         await self.push_frame(frame, direction)
 
 
