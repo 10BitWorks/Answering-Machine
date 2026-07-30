@@ -559,13 +559,14 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list = None):
                             headers={"Content-Type": "audio/mpeg"}
                         )
                         if upload_res.status_code == 200:
-                            # CRITICAL FIX: Send completeUploadExternal as form-encoded data with files as JSON string
+                            # CRITICAL FIX: Send completeUploadExternal as form-encoded data with BOTH channel_id and channels parameters
                             complete_res = await client.post(
                                 "https://slack.com/api/files.completeUploadExternal",
                                 headers=headers,
                                 data={
                                     "files": json.dumps([{"id": file_id, "title": f"Recording - {cnam_name or caller}"}]),
                                     "channel_id": channel_id,
+                                    "channels": channel_id,
                                     "initial_comment": initial_comment_text
                                 }
                             )
@@ -589,7 +590,7 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list = None):
 
                                 # Polling files.info fallback: Slack async post processing may take a short moment to publish shares
                                 if not file_share_ts and file_id:
-                                    for attempt in range(4):
+                                    for attempt in range(6):
                                         await asyncio.sleep(0.5)
                                         try:
                                             info_res = await client.post(
