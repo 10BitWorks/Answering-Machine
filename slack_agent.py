@@ -3,6 +3,7 @@ import asyncio
 import time
 import math
 import re
+import json
 import httpx
 from loguru import logger
 
@@ -481,44 +482,19 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list = None):
         call_cost=call_cost
     )
 
+    loc_str = f" · ⬢ {caller_location}" if caller_location else ""
+    num_str = f" · {format_us_phone(caller_number)}" if caller_number else ""
+    initial_comment_text = f"*{cnam_name or caller}*{num_str}{loc_str}\n{duration_str} · {call_cost}\n\n{summary or 'Call completed.'}"
+    completed_tasks = [t for t in final_tasks if t.get("status") == "complete"]
+    if completed_tasks:
+        task_lines = "\n".join(f"✓ {t.get('title', '')}" for t in completed_tasks[:5])
+        initial_comment_text += f"\n\n{task_lines}"
+
     if slack_token and channel_id:
         async with httpx.AsyncClient(timeout=30.0) as client:
             headers = {"Authorization": f"Bearer {slack_token}"}
 
-            # 1. Update live message to final state if session exists, else post new
-            if thread_ts:
-                try:
-                    await client.post(
-                        "https://slack.com/api/chat.update",
-                        headers=headers,
-                        json={
-                            "channel": channel_id,
-                            "ts": thread_ts,
-                            "blocks": blocks,
-                            "text": f"Call completed with {cnam_name or caller}"
-                        }
-                    )
-                    logger.info(f"Finalized Slack message for call {call_sid}")
-                except Exception as e:
-                    logger.error(f"Error finalizing live Slack message: {e}")
-            else:
-                try:
-                    msg_res = await client.post(
-                        "https://slack.com/api/chat.postMessage",
-                        headers=headers,
-                        json={
-                            "channel": channel_id,
-                            "blocks": blocks,
-                            "text": f"Call completed with {cnam_name or caller}"
-                        }
-                    )
-                    msg_data = msg_res.json()
-                    if msg_data.get("ok"):
-                        thread_ts = msg_data.get("ts")
-                except Exception as e:
-                    logger.error(f"Error posting final Slack message: {e}")
-
-            # 2. Download audio file from Twilio
+            # 1. Download audio file from Twilio
             audio_bytes = None
             if raw_recording_url:
                 logger.info(f"Downloading Twilio recording for call {call_sid} from URL: {raw_recording_url}")
@@ -533,7 +509,7 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list = None):
                         
                     auth = (account_sid, auth_token) if (account_sid and auth_token) else None
                     rec_res = await client.get(clean_url, auth=auth, follow_redirects=False)
-                    if rec_res.status_code in (301, 302, 303, 307):
+                    if rec_res.status_code in (301, 302, 303, 307, 308):
                         redirect_url = rec_res.headers.get("Location") or rec_res.headers.get("location")
                         if redirect_url:
                             # Use clean unauthenticated client for S3 presigned URL to prevent Basic Auth header collisions
@@ -556,13 +532,13 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list = None):
             else:
                 logger.warning(f"No RecordingUrl provided in callback payload for call {call_sid}; skipping audio attachment.")
 
-            # 3. Upload audio file directly into main Slack channel
+            # 2. Upload audio file and create file-share message in Slack channel
+            recording_uploaded = False
             if audio_bytes:
                 try:
                     filename = f"call_recording_{call_sid}.mp3"
                     length = len(audio_bytes)
                     
-                    # Pass filename and length as query params to files.getUploadURLExternal
                     get_url_res = await client.post(
                         "https://slack.com/api/files.getUploadURLExternal",
                         headers=headers,
@@ -583,18 +559,99 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list = None):
                             headers={"Content-Type": "audio/mpeg"}
                         )
                         if upload_res.status_code == 200:
-                            complete_payload = {
-                                "files": [{"id": file_id, "title": f"Recording - {cnam_name or caller}"}],
-                                "channel_id": channel_id
-                            }
+                            # CRITICAL FIX: Send completeUploadExternal as form-encoded data with files as JSON string
                             complete_res = await client.post(
                                 "https://slack.com/api/files.completeUploadExternal",
                                 headers=headers,
-                                json=complete_payload
+                                data={
+                                    "files": json.dumps([{"id": file_id, "title": f"Recording - {cnam_name or caller}"}]),
+                                    "channel_id": channel_id,
+                                    "initial_comment": initial_comment_text
+                                }
                             )
                             comp_data = complete_res.json()
+                            logger.info(f"completeUploadExternal response for call {call_sid}: {json.dumps(comp_data)[:1000]}")
+                            
                             if comp_data.get("ok"):
-                                logger.info(f"Successfully uploaded audio recording to Slack channel for call {call_sid}")
+                                logger.info(f"Successfully completed Slack audio file upload for call {call_sid}")
+                                
+                                # Extract file_share_ts
+                                file_share_ts = None
+                                files_arr = comp_data.get("files") or []
+                                if files_arr:
+                                    file_obj = files_arr[0]
+                                    shares = file_obj.get("shares", {})
+                                    for share_type in ("public", "private"):
+                                        chans = shares.get(share_type, {})
+                                        if channel_id in chans and chans[channel_id]:
+                                            file_share_ts = chans[channel_id][0].get("ts")
+                                            break
+
+                                # Fallback: query files.info if ts not in completion response
+                                if not file_share_ts and file_id:
+                                    try:
+                                        info_res = await client.post(
+                                            "https://slack.com/api/files.info",
+                                            headers=headers,
+                                            data={"file": file_id}
+                                        )
+                                        info_data = info_res.json()
+                                        if info_data.get("ok"):
+                                            shares = info_data.get("file", {}).get("shares", {})
+                                            for share_type in ("public", "private"):
+                                                chans = shares.get(share_type, {})
+                                                if channel_id in chans and chans[channel_id]:
+                                                    file_share_ts = chans[channel_id][0].get("ts")
+                                                    break
+                                    except Exception as e:
+                                        logger.error(f"files.info fallback failed for call {call_sid}: {e}")
+
+                                if file_share_ts:
+                                    logger.info(f"Extracted file_share_ts {file_share_ts} for call {call_sid}. Attempting chat.update with Block Kit blocks...")
+                                    try:
+                                        update_res = await client.post(
+                                            "https://slack.com/api/chat.update",
+                                            headers=headers,
+                                            json={
+                                                "channel": channel_id,
+                                                "ts": file_share_ts,
+                                                "blocks": blocks,
+                                                "text": f"Call completed with {cnam_name or caller}"
+                                            }
+                                        )
+                                        update_data = update_res.json()
+                                        if update_data.get("ok"):
+                                            logger.info(f"Successfully updated file-share message {file_share_ts} with Block Kit blocks for call {call_sid}")
+                                        else:
+                                            logger.warning(f"chat.update on file-share message failed for call {call_sid}: {update_data}; preserving initial_comment text.")
+                                    except Exception as e:
+                                        logger.error(f"Error updating file-share message with blocks for call {call_sid}: {e}")
+
+                                    # Delete old live tracking message so ONLY the single audio file message remains in the channel
+                                    if thread_ts and thread_ts != file_share_ts:
+                                        try:
+                                            del_res = await client.post(
+                                                "https://slack.com/api/chat.delete",
+                                                headers=headers,
+                                                data={"channel": channel_id, "ts": thread_ts}
+                                            )
+                                            logger.info(f"Deleted live tracking message {thread_ts} for call {call_sid}: {del_res.json()}")
+                                        except Exception as del_err:
+                                            logger.error(f"Error deleting live message {thread_ts}: {del_err}")
+
+                                    recording_uploaded = True
+                                else:
+                                    logger.warning(f"Could not extract file_share_ts for call {call_sid}; initial_comment share was posted.")
+                                    if thread_ts:
+                                        try:
+                                            await client.post(
+                                                "https://slack.com/api/chat.delete",
+                                                headers=headers,
+                                                data={"channel": channel_id, "ts": thread_ts}
+                                            )
+                                        except Exception:
+                                            pass
+                                    recording_uploaded = True
                             else:
                                 logger.error(f"files.completeUploadExternal failed for call {call_sid}: {comp_data}")
                         else:
@@ -603,8 +660,38 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list = None):
                         logger.error(f"files.getUploadURLExternal failed for call {call_sid}: {get_url_data}")
                 except Exception as e:
                     logger.error(f"Error uploading audio file to Slack for call {call_sid}: {e}")
-            else:
-                logger.error(f"Audio bytes missing or download failed for call {call_sid}; skipping Slack file upload.")
+
+            # Fallback path if audio recording download/upload failed: finalize live tracking message or post new message
+            if not recording_uploaded:
+                if thread_ts:
+                    try:
+                        await client.post(
+                            "https://slack.com/api/chat.update",
+                            headers=headers,
+                            json={
+                                "channel": channel_id,
+                                "ts": thread_ts,
+                                "blocks": blocks,
+                                "text": f"Call completed with {cnam_name or caller}"
+                            }
+                        )
+                        logger.info(f"Finalized live Slack message for call {call_sid} (fallback path without audio attachment)")
+                    except Exception as e:
+                        logger.error(f"Error finalizing live Slack message in fallback: {e}")
+                else:
+                    try:
+                        await client.post(
+                            "https://slack.com/api/chat.postMessage",
+                            headers=headers,
+                            json={
+                                "channel": channel_id,
+                                "blocks": blocks,
+                                "text": f"Call completed with {cnam_name or caller}"
+                            }
+                        )
+                        logger.info(f"Posted new final Slack message for call {call_sid} (fallback path without audio attachment)")
+                    except Exception as e:
+                        logger.error(f"Error posting final Slack message in fallback: {e}")
 
         active_slack_sessions.pop(call_sid, None)
         return
