@@ -40,8 +40,7 @@ def get_slack_session_by_channel(channel: str) -> dict:
 
 def build_rich_text_object(text: str) -> dict:
     """Helper to wrap string text into Slack rich_text block element."""
-    if not text:
-        return None
+    val = text.strip() if (text and isinstance(text, str) and text.strip()) else "-"
     return {
         "type": "rich_text",
         "elements": [
@@ -50,7 +49,7 @@ def build_rich_text_object(text: str) -> dict:
                 "elements": [
                     {
                         "type": "text",
-                        "text": text
+                        "text": val
                     }
                 ]
             }
@@ -544,8 +543,7 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list = None):
                         headers=headers,
                         params={
                             "filename": filename,
-                            "length": str(length),
-                            "alt_txt": f"Call Recording ({call_sid})"
+                            "length": str(length)
                         }
                     )
                     get_url_data = get_url_res.json()
@@ -559,16 +557,17 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list = None):
                             headers={"Content-Type": "audio/mpeg"}
                         )
                         if upload_res.status_code == 200:
-                            # CRITICAL FIX: Send completeUploadExternal as form-encoded data with BOTH channel_id and channels parameters
+                            # Send completeUploadExternal with JSON payload (as required by Slack API for channel_id sharing)
+                            complete_payload = {
+                                "files": [{"id": file_id, "title": f"Recording - {cnam_name or caller}"}],
+                                "channel_id": channel_id,
+                                "initial_comment": initial_comment_text
+                            }
+
                             complete_res = await client.post(
                                 "https://slack.com/api/files.completeUploadExternal",
                                 headers=headers,
-                                data={
-                                    "files": json.dumps([{"id": file_id, "title": f"Recording - {cnam_name or caller}"}]),
-                                    "channel_id": channel_id,
-                                    "channels": channel_id,
-                                    "initial_comment": initial_comment_text
-                                }
+                                json=complete_payload
                             )
                             comp_data = complete_res.json()
                             logger.info(f"completeUploadExternal response for call {call_sid}: {json.dumps(comp_data)[:1000]}")
@@ -588,10 +587,10 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list = None):
                                             file_share_ts = chans[channel_id][0].get("ts")
                                             break
 
-                                # Polling files.info fallback: Slack async post processing may take a short moment to publish shares
+                                # Polling files.info fallback: Slack async post processing may take several seconds to publish shares for MP3 files
                                 if not file_share_ts and file_id:
-                                    for attempt in range(6):
-                                        await asyncio.sleep(0.5)
+                                    for attempt in range(30):
+                                        await asyncio.sleep(1.0)
                                         try:
                                             info_res = await client.post(
                                                 "https://slack.com/api/files.info",
@@ -601,13 +600,14 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list = None):
                                             info_data = info_res.json()
                                             if info_data.get("ok"):
                                                 shares = info_data.get("file", {}).get("shares", {})
-                                                for share_type in ("public", "private"):
+                                                logger.info(f"files.info attempt {attempt+1} shares for call {call_sid}: {json.dumps(shares)}")
+                                                for share_type in ("public", "private", "channels", "groups"):
                                                     chans = shares.get(share_type, {})
                                                     if channel_id in chans and chans[channel_id]:
                                                         file_share_ts = chans[channel_id][0].get("ts")
                                                         break
                                                 if file_share_ts:
-                                                    logger.info(f"files.info polling attempt {attempt+1} retrieved file_share_ts {file_share_ts} for call {call_sid}")
+                                                    logger.info(f"files.info polling second {attempt+1} retrieved file_share_ts {file_share_ts} for call {call_sid}")
                                                     break
                                             else:
                                                 logger.warning(f"files.info attempt {attempt+1} returned error: {info_data.get('error')}")
