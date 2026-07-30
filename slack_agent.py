@@ -4,8 +4,23 @@ import time
 import httpx
 from loguru import logger
 
-# Active Slack sessions store: {call_sid: {"ts": str, "channel": str, "last_update": float, "caller_name": str, "crm_url": str}}
+# Active Slack sessions store: {call_sid: {"ts": str, "channel": str, "last_update": float, "caller_name": str, "crm_url": str, "summary": str, "tasks": list, "context": object, "speech_tracker": object}}
 active_slack_sessions = {}
+
+def get_slack_session_by_ts(ts: str) -> dict:
+    """Find active call session matching a message ts."""
+    for call_sid, session in active_slack_sessions.items():
+        if session.get("ts") == ts:
+            return session
+    return None
+
+def get_slack_session_by_channel(channel: str) -> dict:
+    """Find most recently updated active call session matching a Slack channel."""
+    matching = [s for s in active_slack_sessions.values() if s.get("channel") == channel]
+    if matching:
+        matching.sort(key=lambda s: s.get("last_update", 0), reverse=True)
+        return matching[0]
+    return None
 
 def build_rich_text_object(text: str) -> dict:
     """Helper to wrap string text into Slack rich_text block element."""
@@ -102,6 +117,7 @@ def build_during_call_blocks(call_sid: str, caller_name: str, summary: str, task
 def build_after_call_blocks(call_sid: str, caller_name: str, duration_str: str, summary: str, tasks: list, sources: list = None) -> list[dict]:
     """
     Builds Slack Block Kit payload matching after-call-example.json layout.
+    Ensures tasks list is never empty.
     """
     plan_tasks = []
     
@@ -128,6 +144,15 @@ def build_after_call_blocks(call_sid: str, caller_name: str, duration_str: str, 
             
         plan_tasks.append(task_obj)
 
+    # Fallback task if no tasks were recorded
+    if not plan_tasks:
+        plan_tasks.append({
+            "task_id": "task_1",
+            "title": "Call conversation completed",
+            "status": "complete",
+            "details": build_rich_text_object("Gracefully ended call")
+        })
+
     summary_text = summary if summary else f"Call completed with *{caller_name}*."
     title_text = f"{duration_str} call from {caller_name}" if duration_str else f"Call from {caller_name}"
 
@@ -151,7 +176,7 @@ def build_after_call_blocks(call_sid: str, caller_name: str, duration_str: str, 
     return blocks
 
 
-async def start_live_call_slack_session(call_sid: str, caller_name: str, caller_number: str, crm_url: str = None) -> str:
+async def start_live_call_slack_session(call_sid: str, caller_name: str, caller_number: str, crm_url: str = None, context=None, speech_tracker=None) -> str:
     """
     Posts the initial 'during call' Slack Block Kit message when a call connects.
     """
@@ -185,7 +210,11 @@ async def start_live_call_slack_session(call_sid: str, caller_name: str, caller_
                     "channel": channel_id,
                     "last_update": time.time(),
                     "caller_name": display_name,
-                    "crm_url": crm_url
+                    "crm_url": crm_url,
+                    "summary": "",
+                    "tasks": [],
+                    "context": context,
+                    "speech_tracker": speech_tracker
                 }
                 logger.info(f"Started live Slack session for call {call_sid} (ts: {ts})")
                 return ts
@@ -208,17 +237,30 @@ async def update_live_call_slack_session(call_sid: str, caller_name: str, summar
     if not slack_token:
         return
 
+    # Update session memory
+    if summary:
+        session["summary"] = summary
+    if tasks:
+        session["tasks"] = tasks
+    if caller_name:
+        session["caller_name"] = caller_name
+    if crm_url:
+        session["crm_url"] = crm_url
+
     now = time.time()
     # Debounce: max 1 update per 1.5 seconds to comply with Slack rate limits
     if now - session["last_update"] < 1.5:
         return
     session["last_update"] = now
 
-    display_name = caller_name or session.get("caller_name", "Caller")
-    url = crm_url or session.get("crm_url")
+    display_name = session.get("caller_name") or caller_name or "Caller"
+    url = session.get("crm_url") or crm_url
+    current_summary = session.get("summary") or summary
+    current_tasks = session.get("tasks") or tasks
+
     sources = [{"type": "url", "url": url, "text": f"CiviCRM contact ({display_name})"}] if url else None
 
-    blocks = build_during_call_blocks(call_sid, display_name, summary, tasks, sources=sources)
+    blocks = build_during_call_blocks(call_sid, display_name, current_summary, current_tasks, sources=sources)
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         headers = {"Authorization": f"Bearer {slack_token}"}
@@ -240,9 +282,9 @@ async def update_live_call_slack_session(call_sid: str, caller_name: str, summar
             logger.error(f"Error updating live call Slack message: {e}")
 
 
-async def finalize_live_call_slack_session(payload: dict, tasks: list):
+async def finalize_live_call_slack_session(payload: dict, tasks: list = None):
     """
-    Finalizes the live call message to the after-call layout and uploads the recording MP3.
+    Finalizes the live call message to the after-call layout and uploads the recording MP3 into the main channel.
     """
     call_sid = payload.get("CallSid", "unknown")
     caller = payload.get("From", "Caller")
@@ -256,18 +298,22 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list):
     else:
         duration_str = ""
 
-    summary = payload.get("Summary", "")
+    summary_from_payload = payload.get("Summary", "")
     raw_recording_url = payload.get("RecordingUrl", "")
 
     session = active_slack_sessions.get(call_sid)
     slack_token = os.getenv("SLACK_BOT_TOKEN")
     channel_id = session["channel"] if session else (os.getenv("SLACK_CHANNEL_ID") or os.getenv("RECORDING_SLACK_CHANNEL_ID"))
     thread_ts = session["ts"] if session else None
-    caller_name = session.get("caller_name", caller) if session else caller
+    caller_name = (session.get("caller_name") if session else None) or caller
     crm_url = session.get("crm_url") if session else None
+    
+    summary = summary_from_payload or (session.get("summary") if session else "")
+    final_tasks = tasks or (session.get("tasks") if session else []) or []
+
     sources = [{"type": "url", "url": crm_url, "text": f"CiviCRM contact ({caller_name})"}] if crm_url else None
 
-    blocks = build_after_call_blocks(call_sid, caller_name, duration_str, summary, tasks, sources=sources)
+    blocks = build_after_call_blocks(call_sid, caller_name, duration_str, summary, final_tasks, sources=sources)
 
     if slack_token and channel_id:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -306,7 +352,7 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list):
                 except Exception as e:
                     logger.error(f"Error posting final Slack message: {e}")
 
-            # 2. Download audio file from Twilio
+            # 2. Download audio file from Twilio using 2-step redirect (Twilio API -> Amazon S3)
             audio_bytes = None
             if raw_recording_url:
                 try:
@@ -319,15 +365,25 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list):
                         clean_url += ".mp3"
                         
                     auth = (account_sid, auth_token) if (account_sid and auth_token) else None
-                    rec_res = await client.get(clean_url, auth=auth, follow_redirects=True)
-                    if rec_res.status_code == 200:
+                    
+                    # Step 1: Request Twilio endpoint without auto-redirecting
+                    rec_res = await client.get(clean_url, auth=auth, follow_redirects=False)
+                    if rec_res.status_code in (301, 302, 303, 307):
+                        redirect_url = rec_res.headers.get("Location")
+                        # Step 2: Fetch MP3 content from S3 presigned URL WITHOUT Auth header
+                        s3_res = await client.get(redirect_url, follow_redirects=True)
+                        if s3_res.status_code == 200:
+                            audio_bytes = s3_res.content
+                        else:
+                            logger.warning(f"S3 download failed with status {s3_res.status_code}")
+                    elif rec_res.status_code == 200:
                         audio_bytes = rec_res.content
                     else:
-                        logger.warning(f"Failed to download Twilio recording: HTTP {rec_res.status_code}")
+                        logger.warning(f"Twilio recording download returned HTTP {rec_res.status_code}")
                 except Exception as e:
                     logger.error(f"Error downloading Twilio audio: {e}")
 
-            # 3. Upload audio file to Slack thread
+            # 3. Upload audio file directly into main Slack channel
             if audio_bytes:
                 try:
                     filename = f"call_recording_{call_sid}.mp3"
@@ -357,9 +413,7 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list):
                                 "files": [{"id": file_id, "title": f"Recording - {caller_name}"}],
                                 "channel_id": channel_id
                             }
-                            if thread_ts:
-                                complete_payload["thread_ts"] = thread_ts
-                                
+                            # Omit thread_ts so audio file attaches directly into main channel feed
                             complete_res = await client.post(
                                 "https://slack.com/api/files.completeUploadExternal",
                                 headers=headers,
@@ -367,13 +421,12 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list):
                             )
                             comp_data = complete_res.json()
                             if comp_data.get("ok"):
-                                logger.info(f"Successfully attached audio recording to Slack thread for call {call_sid}")
+                                logger.info(f"Successfully uploaded audio recording to Slack channel for call {call_sid}")
                             else:
                                 logger.error(f"files.completeUploadExternal failed: {comp_data}")
                 except Exception as e:
-                    logger.error(f"Error uploading audio file to Slack thread: {e}")
+                    logger.error(f"Error uploading audio file to Slack: {e}")
 
-        # Clean up session
         active_slack_sessions.pop(call_sid, None)
         return
 

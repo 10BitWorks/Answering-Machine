@@ -36,14 +36,18 @@ from pipecat.serializers.twilio import TwilioFrameSerializer
 
 load_dotenv(override=True)
 
+import json
 import sync_knowledgebase
 import civicrm_lookup
 from slack_agent import (
     start_live_call_slack_session,
     update_live_call_slack_session,
     finalize_live_call_slack_session,
-    send_slack_knowledge_gap_notification
+    send_slack_knowledge_gap_notification,
+    get_slack_session_by_ts,
+    get_slack_session_by_channel
 )
+
 from processors import SpeechTracker, CallerMuter
 
 
@@ -271,6 +275,55 @@ async def recording_callback(request: Request):
     tasks = call_turn_tasks.pop(call_sid, [])
     await finalize_live_call_slack_session(payload, tasks)
     return Response(status_code=204)
+
+
+@app.post("/slack/interactivity")
+async def slack_interactivity(request: Request):
+    form_data = await request.form()
+    payload_raw = form_data.get("payload")
+    if not payload_raw:
+        return Response(status_code=400)
+
+    try:
+        payload_data = json.loads(payload_raw)
+    except Exception as e:
+        logger.error(f"Failed to parse Slack interactivity JSON: {e}")
+        return Response(status_code=400)
+
+    payload_type = payload_data.get("type")
+    
+    if payload_type == "block_actions":
+        actions = payload_data.get("actions", [])
+        container = payload_data.get("container", {})
+        message_ts = container.get("message_ts")
+        channel_id = container.get("channel_id")
+        
+        session = get_slack_session_by_ts(message_ts) or get_slack_session_by_channel(channel_id)
+        
+        for action in actions:
+            if action.get("action_id") == "plain_text_input-action":
+                hint_text = (action.get("value") or "").strip()
+                if hint_text and session:
+                    context = session.get("context")
+                    speech_tracker = session.get("speech_tracker")
+                    call_sid = session.get("call_sid")
+                    
+                    logger.info(f"Received operator steering hint for call {call_sid}: {hint_text}")
+                    
+                    if speech_tracker:
+                        speech_tracker.add_task_detail(f"Operator hint: {hint_text}")
+                        
+                    if context:
+                        if speech_tracker and speech_tracker.is_speaking:
+                            await asyncio.sleep(0.5)
+                        context.add_message({
+                            "role": "developer",
+                            "content": f"INSTRUCTION FROM OPERATOR: {hint_text}"
+                        })
+                        logger.info(f"Injected operator hint into LLM context for call {call_sid}")
+                        
+    return Response(status_code=200)
+
 
 
 
@@ -887,7 +940,8 @@ async def websocket_endpoint(websocket: WebSocket):
             greeting = f"'You've reached the answering machine for 10BitWorks, San Antonio's largest member-supported makerspace! How can I help you today, {name}?'"
 
         # Start live Slack tracking session
-        asyncio.create_task(start_live_call_slack_session(call_sid, caller_display_name, caller_number, crm_url))
+        asyncio.create_task(start_live_call_slack_session(call_sid, caller_display_name, caller_number, crm_url, context=context, speech_tracker=speech_tracker))
+
 
         # Determine the recipient label for Zammad CTI
         recipient_label = "Makerspace"

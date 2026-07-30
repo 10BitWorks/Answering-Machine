@@ -6,6 +6,7 @@ from pipecat.frames.frames import (
     BotStoppedSpeakingFrame,
     TranscriptionFrame,
     LLMContextFrame,
+    TextFrame,
     AudioRawFrame
 )
 
@@ -28,8 +29,10 @@ class SpeechTracker(FrameProcessor):
         """Adds internal tool/action detail to the active turn task."""
         if self.current_task:
             self.current_task["details_text"] = detail_text
-            if self.on_turn_update:
-                asyncio.create_task(self._trigger_update())
+        elif self.tasks:
+            self.tasks[-1]["details_text"] = detail_text
+        if self.on_turn_update:
+            asyncio.create_task(self._trigger_update())
 
     async def _trigger_update(self):
         if self.on_turn_update:
@@ -51,27 +54,35 @@ class SpeechTracker(FrameProcessor):
                 self.current_task["status"] = "complete"
                 await self._trigger_update()
         elif isinstance(frame, TranscriptionFrame):
-            if frame.user_id == "user" and frame.text and frame.text.strip():
-                text = frame.text.strip()
-                self.call_history.append(f"[User] {text}")
-                
-                # Create a new turn task object matching Slack plan block task schema
-                task_id = f"task_{len(self.tasks) + 1}"
-                self.current_task = {
-                    "task_id": task_id,
-                    "title": text,
-                    "status": "in_progress",
-                    "output_text": "",
-                    "details_text": ""
-                }
-                self.tasks.append(self.current_task)
+            text = (frame.text or "").strip()
+            if text:
+                if frame.user_id == "user":
+                    self.call_history.append(f"[User] {text}")
+                    task_id = f"task_{len(self.tasks) + 1}"
+                    self.current_task = {
+                        "task_id": task_id,
+                        "title": text,
+                        "status": "in_progress",
+                        "output_text": "",
+                        "details_text": ""
+                    }
+                    self.tasks.append(self.current_task)
+                    await self._trigger_update()
+                else:
+                    self.call_history.append(f"[Bot] {text}")
+                    if self.current_task:
+                        self.current_task["output_text"] = text
+                        await self._trigger_update()
+        elif isinstance(frame, TextFrame):
+            text = (frame.text or "").strip()
+            if text and self.current_task:
+                self.current_task["output_text"] = text
                 await self._trigger_update()
         elif isinstance(frame, LLMContextFrame):
             for msg in reversed(frame.context.messages):
                 if msg.get("role") == "assistant" and msg.get("content"):
-                    bot_text = msg["content"].strip()
-                    self.call_history.append(f"[Bot] {bot_text}")
-                    if self.current_task:
+                    bot_text = str(msg["content"]).strip()
+                    if self.current_task and not self.current_task.get("output_text"):
                         self.current_task["output_text"] = bot_text
                         await self._trigger_update()
                     break
