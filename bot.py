@@ -590,7 +590,7 @@ async def websocket_endpoint(websocket: WebSocket):
         if speech_tracker.is_speaking:
             call_logger.info("Final speech detected. Waiting for bot to finish...")
             # 2. Wait for bot to FINISH speaking
-            max_speech_wait = 20.0
+            max_speech_wait = 10.0
             speech_start = asyncio.get_event_loop().time()
             while speech_tracker.is_speaking and (asyncio.get_event_loop().time() - speech_start) < max_speech_wait:
                 await asyncio.sleep(0.05)
@@ -615,7 +615,7 @@ async def websocket_endpoint(websocket: WebSocket):
             is_terminating = True
             asyncio.create_task(wait_and_terminate())
         # Return success immediately so the bot can say its final goodbye turn
-        return {"status": "hangup_initiated", "instruction": "You are now hanging up. Say a brief and polite goodbye to the user now before the connection is severed. Be sure to end with the tagline: Come and Make It!"}
+        return {"status": "hangup_initiated", "instruction": "You are now hanging up. Say a brief and polite goodbye to the user now before the connection is severed. BE SURE TO END BY SAYING THE TAGLINE: Come and Make It!"}
 
     async def notify_slack(params: FunctionCallParams):
         observation = params.arguments.get("observation")
@@ -646,7 +646,7 @@ async def websocket_endpoint(websocket: WebSocket):
         # Guard against hallucinated/placeholder phone numbers (e.g. from cancelled lookups)
         if phone_number and "555" in phone_number.replace("-", "").replace(" ", ""):
             call_logger.warning(f"Rejected hallucinated phone number: {phone_number}")
-            await args.result_callback({"status": "error", "message": f"The phone number {phone_number} appears to be invalid. Please use lookup_contact to find the real phone number first."})
+            await args.result_callback({"status": "error", "message": f"The phone number {phone_number} appears to be invalid. Please use lookup_contact to find the real phone number first. Again: THE CALL IS NOT BEING TRANSFERRED. DO NOT WAIT IN SILENCE - LOOK UP THE CONTACT AGAIN OR TELL THE USER WHAT HAPPENED."})
             return
         
         call_logger.info(f"Transferring call for {call_data['call_id']} to {contact_name} at {phone_number}")
