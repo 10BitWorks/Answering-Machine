@@ -114,13 +114,41 @@ def build_during_call_blocks(call_sid: str, caller_name: str, summary: str, task
     ]
     return blocks
 
-def build_after_call_blocks(call_sid: str, caller_name: str, duration_str: str, summary: str, tasks: list, sources: list = None) -> list[dict]:
+def build_after_call_blocks(call_sid: str, caller_name: str, duration_str: str, summary: str, tasks: list, sources: list = None, caller_number: str = None, caller_location: str = None) -> list[dict]:
     """
-    Builds Slack Block Kit payload matching after-call-example.json layout.
-    Ensures tasks list is never empty.
+    Builds Slack Block Kit payload matching updated after-call-example.json layout:
+    1. Card block with title (caller name), subtitle (phone & location), and mobile icon
+    2. Plan block with completed turn tasks
+    3. Context block with summary text
+    4. Container block (collapsible Call Details with API Cost table)
     """
+    card_title = caller_name if caller_name else (caller_number or "Phone Call")
+    subtitle_parts = []
+    if caller_number:
+        subtitle_parts.append(caller_number)
+    if caller_location:
+        subtitle_parts.append(f"⬢ {caller_location}")
+    subtitle_text = " ".join(subtitle_parts) if subtitle_parts else "Incoming Telephony Call"
+
+    card_block = {
+        "type": "card",
+        "slack_icon": {
+            "type": "icon",
+            "name": "mobile"
+        },
+        "title": {
+            "type": "mrkdwn",
+            "text": card_title,
+            "verbatim": False
+        },
+        "subtitle": {
+            "type": "mrkdwn",
+            "text": subtitle_text,
+            "verbatim": False
+        }
+    }
+
     plan_tasks = []
-    
     for idx, t in enumerate(tasks, 1):
         task_id = t.get("task_id", f"task_{idx}")
         title = t.get("title", f"Turn {idx}")
@@ -156,24 +184,64 @@ def build_after_call_blocks(call_sid: str, caller_name: str, duration_str: str, 
     summary_text = summary if summary else f"Call completed with *{caller_name}*."
     title_text = f"{duration_str} call from {caller_name}" if duration_str else f"Call from {caller_name}"
 
-    blocks = [
-        {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": summary_text
-                }
-            ]
+    plan_block = {
+        "type": "plan",
+        "plan_id": f"plan_{call_sid}",
+        "title": title_text,
+        "tasks": plan_tasks
+    }
+
+    context_block = {
+        "type": "context",
+        "elements": [
+            {
+                "type": "mrkdwn",
+                "text": summary_text
+            }
+        ]
+    }
+
+    details_container = {
+        "type": "container",
+        "block_id": "bkb_container_collapsible",
+        "title": {
+            "type": "plain_text",
+            "text": "Call Details"
         },
-        {
-            "type": "plan",
-            "plan_id": f"plan_{call_sid}",
-            "title": title_text,
-            "tasks": plan_tasks
-        }
-    ]
+        "is_collapsible": True,
+        "default_collapsed": True,
+        "child_blocks": [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": "API Cost",
+                    "emoji": True
+                }
+            },
+            {
+                "type": "table",
+                "rows": [
+                    [
+                        build_rich_text_object("Call"),
+                        build_rich_text_object("CNAM (Caller ID)"),
+                        build_rich_text_object("AI"),
+                        build_rich_text_object("Total")
+                    ],
+                    [
+                        build_rich_text_object("$0.0137"),
+                        build_rich_text_object("$0.0100"),
+                        build_rich_text_object("$0.0389"),
+                        build_rich_text_object("$0.0592")
+                    ]
+                ]
+            }
+        ]
+    }
+
+    blocks = [card_block, plan_block, context_block, details_container]
     return blocks
+
 
 
 async def start_live_call_slack_session(call_sid: str, caller_name: str, caller_number: str, crm_url: str = None, context=None, speech_tracker=None) -> str:
@@ -311,9 +379,25 @@ async def finalize_live_call_slack_session(payload: dict, tasks: list = None):
     summary = summary_from_payload or (session.get("summary") if session else "")
     final_tasks = tasks or (session.get("tasks") if session else []) or []
 
+    caller_city = payload.get("CallerCity", "")
+    caller_state = payload.get("CallerState", "")
+    caller_zip = payload.get("CallerZip", "")
+    loc_parts = [p for p in [caller_city, f"{caller_state} {caller_zip}".strip()] if p]
+    caller_location = ", ".join(loc_parts) if loc_parts else None
+
     sources = [{"type": "url", "url": crm_url, "text": f"CiviCRM contact ({caller_name})"}] if crm_url else None
 
-    blocks = build_after_call_blocks(call_sid, caller_name, duration_str, summary, final_tasks, sources=sources)
+    blocks = build_after_call_blocks(
+        call_sid,
+        caller_name,
+        duration_str,
+        summary,
+        final_tasks,
+        sources=sources,
+        caller_number=caller,
+        caller_location=caller_location
+    )
+
 
     if slack_token and channel_id:
         async with httpx.AsyncClient(timeout=30.0) as client:

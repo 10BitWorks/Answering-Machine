@@ -882,12 +882,13 @@ async def websocket_endpoint(websocket: WebSocket):
     pipeline = Pipeline([
         transport.input(),
         caller_muter,
+        speech_tracker,
         user_aggregator,
         llm,
         assistant_aggregator,
-        speech_tracker,
         transport.output()
     ])
+
 
     task = PipelineTask(
         pipeline, 

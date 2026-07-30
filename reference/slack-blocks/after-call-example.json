@@ -1,13 +1,21 @@
 {
     "blocks": [
         {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": "Former Member *Michael Scott* asked to use the lasercutter, but does not have a current membership. Offered to help renew. He asked if he could come in on the weekend."
-                }
-            ]
+            "type": "card",
+            "slack_icon": {
+                "type": "icon",
+                "name": "mobile"
+            },
+            "title": {
+                "type": "mrkdwn",
+                "text": "Michael Scott",
+                "verbatim": false
+            },
+            "subtitle": {
+                "type": "mrkdwn",
+                "text": "(848) 218-0683 ⬢ Newark, NJ 07860",
+                "verbatim": false
+            }
         },
         {
             "type": "plan",
@@ -105,6 +113,156 @@
                             }
                         ]
                     }
+                }
+            ]
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": "Former Member *Michael Scott* asked to use the lasercutter, but does not have a current membership. Offered to help renew. He asked if he could come in on the weekend."
+                }
+            ]
+        },
+        {
+            "type": "container",
+            "block_id": "bkb_container_collapsible",
+            "title": {
+                "type": "plain_text",
+                "text": "Call Details"
+            },
+            "is_collapsible": true,
+            "default_collapsed": true,
+            "child_blocks": [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "API Cost",
+                        "emoji": true
+                    }
+                },
+                {
+                    "type": "table",
+                    "rows": [
+                        [
+                            {
+                                "type": "rich_text",
+                                "elements": [
+                                    {
+                                        "type": "rich_text_section",
+                                        "elements": [
+                                            {
+                                                "type": "text",
+                                                "text": "Call"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "rich_text",
+                                "elements": [
+                                    {
+                                        "type": "rich_text_section",
+                                        "elements": [
+                                            {
+                                                "type": "text",
+                                                "text": "CNAM (Caller ID)"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "rich_text",
+                                "elements": [
+                                    {
+                                        "type": "rich_text_section",
+                                        "elements": [
+                                            {
+                                                "type": "text",
+                                                "text": "AI"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "rich_text",
+                                "elements": [
+                                    {
+                                        "type": "rich_text_section",
+                                        "elements": [
+                                            {
+                                                "type": "text",
+                                                "text": "Total"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        ],
+                        [
+                            {
+                                "type": "rich_text",
+                                "elements": [
+                                    {
+                                        "type": "rich_text_section",
+                                        "elements": [
+                                            {
+                                                "type": "text",
+                                                "text": "$0.0137"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "rich_text",
+                                "elements": [
+                                    {
+                                        "type": "rich_text_section",
+                                        "elements": [
+                                            {
+                                                "type": "text",
+                                                "text": "$0.01"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "rich_text",
+                                "elements": [
+                                    {
+                                        "type": "rich_text_section",
+                                        "elements": [
+                                            {
+                                                "type": "text",
+                                                "text": "$0.0389"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "rich_text",
+                                "elements": [
+                                    {
+                                        "type": "rich_text_section",
+                                        "elements": [
+                                            {
+                                                "type": "text",
+                                                "text": "$0.0592"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        ]
+                    ]
                 }
             ]
         }
