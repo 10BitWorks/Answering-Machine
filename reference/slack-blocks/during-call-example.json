@@ -1,0 +1,98 @@
+{
+    "blocks": [
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": "Former Member *Michael Scott* asked to use the lasercutter, but does not have a current membership. Offered to help renew. He asked if he could come in on the weekend."
+                }
+            ]
+        },
+        {
+            "type": "plan",
+            "plan_id": "plan_1",
+            "title": "Handling incoming call from Michael Scott",
+            "tasks": [
+                {
+                    "task_id": "task_1",
+                    "title": "Can I come in to use the lasercutter?",
+                    "status": "complete",
+                    "details": {
+                        "type": "rich_text",
+                        "elements": [
+                            {
+                                "type": "rich_text_section",
+                                "elements": [
+                                    {
+                                        "type": "text",
+                                        "text": "Verified Membership status"
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    "output": {
+                        "type": "rich_text",
+                        "elements": [
+                            {
+                                "type": "rich_text_section",
+                                "elements": [
+                                    {
+                                        "type": "text",
+                                        "text": "I understand you want to use our big lasercutter. For liability reasons, this is only available to those with a current membership. I see your membership expired on June 8th - would you like help with the renewal process?"
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    "sources": [
+                        {
+                            "type": "url",
+                            "url": "https://10bitworks.org/wp-admin/admin.php?page=CiviCRM&q=civicrm%2Fcontact%2Fview&reset=1&cid=6",
+                            "text": "CiviCRM contact #6"
+                        }
+                    ]
+                },
+                {
+                    "task_id": "task_2_bkb",
+                    "title": "Can I just come in on a weekend?",
+                    "status": "in_progress",
+                    "output": {
+                        "type": "rich_text",
+                        "elements": [
+                            {
+                                "type": "rich_text_section",
+                                "elements": [
+                                    {
+                                        "type": "text",
+                                        "text": "You're welcome to come in on the weekend, but keep in mind that you won't be able to operate the machine yourself without that signed waiver. Members may be able to assist you, however."
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "task_id": "task_3_bkb",
+                    "title": "Listening for next response...",
+                    "status": "pending"
+                }
+            ]
+        },
+        {
+            "dispatch_action": true,
+            "type": "input",
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "plain_text_input-action"
+            },
+            "label": {
+                "type": "plain_text",
+                "text": "Give me a hint",
+                "emoji": true
+            },
+            "optional": false
+        }
+    ]
+}

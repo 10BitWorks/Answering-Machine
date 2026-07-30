@@ -38,8 +38,14 @@ load_dotenv(override=True)
 
 import sync_knowledgebase
 import civicrm_lookup
-from slack_agent import post_call_results_to_slack, send_slack_knowledge_gap_notification
+from slack_agent import (
+    start_live_call_slack_session,
+    update_live_call_slack_session,
+    finalize_live_call_slack_session,
+    send_slack_knowledge_gap_notification
+)
 from processors import SpeechTracker, CallerMuter
+
 
 import civicrm_agent
 import zammad_cti
@@ -95,6 +101,8 @@ pending_hangups = set()
 active_calls = {} # {call_sid: {"from": ..., "to": ...}}
 call_transcripts = {} # {call_sid: "transcript text"}
 call_summaries = {} # {call_sid: "summary text"}
+call_turn_tasks = {} # {call_sid: [task_dicts]}
+
 
 
 # Sync knowledgebase on startup
@@ -260,8 +268,10 @@ async def recording_callback(request: Request):
     else:
         payload["Summary"] = "No summary available."
 
-    await post_call_results_to_slack(payload)
+    tasks = call_turn_tasks.pop(call_sid, [])
+    await finalize_live_call_slack_session(payload, tasks)
     return Response(status_code=204)
+
 
 
 
@@ -485,8 +495,18 @@ async def websocket_endpoint(websocket: WebSocket):
         reconnect_on_error=False
     )
 
-    speech_tracker = SpeechTracker(call_history)
+    call_turn_tasks[call_sid] = []
+    caller_display_name = caller_name if caller_name else caller_number
+    crm_url = None
+
+    def on_turn_update(tasks):
+        call_turn_tasks[call_sid] = tasks
+        current_sum = call_summaries.get(call_sid, "")
+        asyncio.create_task(update_live_call_slack_session(call_sid, caller_display_name, current_sum, tasks, crm_url))
+
+    speech_tracker = SpeechTracker(call_history, on_turn_update=on_turn_update)
     caller_muter = CallerMuter(speech_tracker)
+
     
     is_terminating = False # Prevent double-termination race conditions
     
@@ -528,7 +548,9 @@ async def websocket_endpoint(websocket: WebSocket):
         nonlocal is_terminating
         call_sid = call_data["call_id"]
         call_logger.info(f"Bot is ending the call {call_sid} via end_call tool")
+        speech_tracker.add_task_detail("Gracefully ended call")
         pending_hangups.add(call_sid)
+
         if not is_terminating:
             is_terminating = True
             asyncio.create_task(wait_and_terminate())
@@ -832,7 +854,7 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.info(f"Client connected: {client}")
         now = datetime.now(ZoneInfo("America/Chicago")).strftime("%A, %B %d, %Y at %I:%M %p")
         
-        nonlocal caller_contact_id, caller_recognized_name
+        nonlocal caller_contact_id, caller_recognized_name, caller_display_name, crm_url
         contact_info = await civicrm_lookup.lookup_contact_by_phone(caller_number)
         
         detail_block = ""
@@ -846,6 +868,9 @@ async def websocket_endpoint(websocket: WebSocket):
             caller_contact_id = contact_info["contact_id"]
             name = contact_info["name"]
             caller_recognized_name = name
+            caller_display_name = name
+            crm_url = f"https://10bitworks.org/wp-admin/admin.php?page=CiviCRM&q=civicrm%2Fcontact%2Fview&reset=1&cid={caller_contact_id}"
+            speech_tracker.add_task_detail("Verified Membership status")
             
             # Fetch full profile in parallel to reduce handshake latency
             membership, contact_details = await asyncio.gather(
@@ -860,7 +885,10 @@ async def websocket_endpoint(websocket: WebSocket):
             
             detail_block = f"CURRENT CALLER INFO: Recognized as {name} (ID: {caller_contact_id}).\n\n{membership}\n\n{contact_details}"
             greeting = f"'You've reached the answering machine for 10BitWorks, San Antonio's largest member-supported makerspace! How can I help you today, {name}?'"
-            
+
+        # Start live Slack tracking session
+        asyncio.create_task(start_live_call_slack_session(call_sid, caller_display_name, caller_number, crm_url))
+
         # Determine the recipient label for Zammad CTI
         recipient_label = "Makerspace"
         if "2105470221" in destination_number:
@@ -882,6 +910,7 @@ async def websocket_endpoint(websocket: WebSocket):
         context.add_message(
             {"role": "developer", "content": f"SYSTEM INFO: Your name is {selected_voice}. The current date and time is {now}. The caller's phone number is {caller_number}.\n\n{detail_block}\n\nSimply say: {greeting}"}
         )
+
         await task.queue_frames([LLMRunFrame()])
 
     @llm.event_handler("on_error")
