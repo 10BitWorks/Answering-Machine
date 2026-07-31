@@ -1,3 +1,11 @@
+
+
+- Get steering hint field in Slack to work
+- Get actual AI cost from Google AI API for Slack display
+
+- Let recording upload wait indefinitely since transferred calls continue on after bot ends and recording doesn't arrive until final hangup
+- Use audio-aware gemini LLM to summarize actual final audio clip
+
 - Remove / Rethink Zammad integration
 - Improve metadata and formatting of CiviCRM call Activities
 - Get external support bot set up with quick responses
