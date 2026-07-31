@@ -556,6 +556,11 @@ async def websocket_endpoint(websocket: WebSocket):
     )
 
     call_turn_tasks[call_sid] = []
+    if caller_name:
+        caller_name = caller_name.strip().title()
+        caller_first_name = caller_name.split()[0] if caller_name.split() else caller_name
+    else:
+        caller_first_name = ""
     caller_display_name = caller_name if caller_name else caller_number
     crm_url = None
 
