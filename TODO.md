@@ -1,5 +1,5 @@
 
-
+- Fix up slack message blocks - post-call contact card should look like during-call card
 - Get steering hint field in Slack to work
 - Get actual AI cost from Google AI API for Slack display
 

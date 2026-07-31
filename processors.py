@@ -16,7 +16,7 @@ class SpeechTracker(FrameProcessor):
     VAD status, chronologically recording call history transcripts, and
     structuring turn tasks for real-time Slack updates.
     """
-    def __init__(self, call_history: list = None, context = None, on_turn_update = None):
+    def __init__(self, call_history: list = None, context = None, on_turn_update = None, call_logger = None):
         super().__init__()
         self.is_speaking = False
         self.first_utterance_finished = False
@@ -24,6 +24,7 @@ class SpeechTracker(FrameProcessor):
         self.context = context
         self.tasks = []  # List of turn dicts for Slack plan block schema
         self.on_turn_update = on_turn_update
+        self.call_logger = call_logger
         self.current_task = None
 
     def add_task_detail(self, detail_text: str):
@@ -77,8 +78,10 @@ class SpeechTracker(FrameProcessor):
         for idx, turn in enumerate(user_turns, 1):
             task_id = f"task_{idx}"
             existing_detail = ""
+            existing_status = ""
             if idx - 1 < len(self.tasks):
                 existing_detail = self.tasks[idx - 1].get("details_text", "")
+                existing_status = self.tasks[idx - 1].get("status", "")
                 
             new_task = {
                 "task_id": task_id,
@@ -88,6 +91,12 @@ class SpeechTracker(FrameProcessor):
                 "details_text": existing_detail or turn["details_text"]
             }
             new_tasks.append(new_task)
+            
+            # If a turn just became complete, log its output and add to the flat call_history
+            if turn["status"] == "complete" and existing_status != "complete" and turn["output_text"]:
+                if self.call_logger:
+                    self.call_logger.debug(f"[Transcription:bot] [{turn['output_text']}]")
+                self.call_history.append(f"[Bot] {turn['output_text']}")
             
         self.tasks = new_tasks
         if self.tasks:
@@ -125,6 +134,8 @@ class SpeechTracker(FrameProcessor):
             if text:
                 if frame.user_id == "user":
                     self.call_history.append(f"[User] {text}")
+                    if self.call_logger:
+                        self.call_logger.debug(f"[Transcription:user] [{text}]")
                     task_id = f"task_{len(self.tasks) + 1}"
                     self.current_task = {
                         "task_id": task_id,
@@ -137,6 +148,8 @@ class SpeechTracker(FrameProcessor):
                     await self._trigger_update()
                 else:
                     self.call_history.append(f"[Bot] {text}")
+                    if self.call_logger:
+                        self.call_logger.debug(f"[Transcription:bot] [{text}]")
                     if self.current_task:
                         self.current_task["output_text"] = text
                         await self._trigger_update()

@@ -361,7 +361,7 @@ async def websocket_endpoint(websocket: WebSocket):
         log_file, 
         filter=lambda record: record["extra"].get("call_id") == call_sid,
         format="{time} | {level: <8} | {message}",
-        level="DEBUG" # Keep debug on for call files to catch jitter
+        level="INFO"
     )
     call_logger = logger.bind(call_id=call_sid)
     call_logger.info(f"Accepted {transport_type} call: {call_data} (Voice: {selected_voice})")
@@ -569,7 +569,7 @@ async def websocket_endpoint(websocket: WebSocket):
         current_sum = call_summaries.get(call_sid, "")
         asyncio.create_task(update_live_call_slack_session(call_sid, caller_display_name, current_sum, tasks, crm_url))
 
-    speech_tracker = SpeechTracker(call_history, on_turn_update=on_turn_update)
+    speech_tracker = SpeechTracker(call_history, on_turn_update=on_turn_update, call_logger=call_logger)
     caller_muter = CallerMuter(speech_tracker)
 
     
