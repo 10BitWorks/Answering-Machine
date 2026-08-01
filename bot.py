@@ -406,7 +406,8 @@ async def websocket_endpoint(websocket: WebSocket):
             add_wav_header=False,
             serializer=serializer,
             fixed_audio_packet_size=320,
-            audio_out_auto_silence=False
+            audio_out_auto_silence=False,
+            audio_out_sample_rate=8000
         )
     )
 
