@@ -48,7 +48,7 @@ from slack_agent import (
     get_slack_session_by_channel
 )
 
-from processors import SpeechTracker, CallerMuter
+from processors import SpeechTracker, CallerMuter, MetricsLogger
 
 
 import civicrm_agent
@@ -361,7 +361,7 @@ async def websocket_endpoint(websocket: WebSocket):
         log_file, 
         filter=lambda record: record["extra"].get("call_id") == call_sid,
         format="{time} | {level: <8} | {message}",
-        level="INFO"
+        level="DEBUG" # Keep debug on for call files to catch jitter
     )
     call_logger = logger.bind(call_id=call_sid)
     call_logger.info(f"Accepted {transport_type} call: {call_data} (Voice: {selected_voice})")
@@ -570,6 +570,7 @@ async def websocket_endpoint(websocket: WebSocket):
         asyncio.create_task(update_live_call_slack_session(call_sid, caller_display_name, current_sum, tasks, crm_url))
 
     speech_tracker = SpeechTracker(call_history, on_turn_update=on_turn_update, call_logger=call_logger)
+    metrics_logger = MetricsLogger(call_logger=call_logger)
     caller_muter = CallerMuter(speech_tracker)
 
     
@@ -620,12 +621,15 @@ async def websocket_endpoint(websocket: WebSocket):
             is_terminating = True
             asyncio.create_task(wait_and_terminate())
         # Return success immediately so the bot can say its final goodbye turn
-        return {"status": "hangup_initiated", "instruction": "You are now hanging up. Say a brief and polite goodbye to the user now before the connection is severed. BE SURE TO END BY SAYING THE TAGLINE: Come and Make It!"}
+        result = {"status": "hangup_initiated", "instruction": "You are now hanging up. Say a brief and polite goodbye to the user now before the connection is severed. BE SURE TO END BY SAYING THE TAGLINE: Come and Make It!"}
+        call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str(result))
+        return result
 
     async def notify_slack(params: FunctionCallParams):
         observation = params.arguments.get("observation")
         success = send_slack_knowledge_gap_notification(observation, call_logger)
         if not success:
+            call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error"}))
             await params.result_callback({"status": "error"})
             return
 
@@ -637,6 +641,10 @@ async def websocket_endpoint(websocket: WebSocket):
         if was_speaking:
             await await_bot_silence()
         
+        call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({
+            "status": "success",
+            "feedback": "Internal observation logged. Instruction: DO NOT mention this log to the caller. Proceed with your current response naturally."
+        }))
         await params.result_callback({
             "status": "success",
             "feedback": "Internal observation logged. Instruction: DO NOT mention this log to the caller. Proceed with your current response naturally."
@@ -651,6 +659,7 @@ async def websocket_endpoint(websocket: WebSocket):
         # Guard against hallucinated/placeholder phone numbers (e.g. from cancelled lookups)
         if phone_number and "555" in phone_number.replace("-", "").replace(" ", ""):
             call_logger.warning(f"Rejected hallucinated phone number: {phone_number}")
+            call_logger.info(f"Sending tool result to Gemini Live for function={args.function_name}, tool_result_message=" + str({"status": "error"}))
             await args.result_callback({"status": "error", "message": f"The phone number {phone_number} appears to be invalid. Please use lookup_contact to find the real phone number first. Again: THE CALL IS NOT BEING TRANSFERRED. DO NOT WAIT IN SILENCE - LOOK UP THE CONTACT AGAIN OR TELL THE USER WHAT HAPPENED."})
             return
         
@@ -666,6 +675,7 @@ async def websocket_endpoint(websocket: WebSocket):
             pending_hangups.remove(call_sid)
             
         # Send the tool result FIRST so Gemini receives the instruction to announce the transfer
+        call_logger.info(f"Sending tool result to Gemini Live for function={args.function_name}, tool_result_message=" + str({"status": "transfer_initiated"}))
         await args.result_callback({"status": "transfer_initiated", "instruction": f"You are now transferring the call to {contact_name}. Briefly inform the user that you are connecting them now. CRITICAL: Do NOT call the end_call tool yourself; the system handles the hangup naturally after the transfer."})
         
         # Give Gemini time to process the result and begin generating its announcement
@@ -688,52 +698,67 @@ async def websocket_endpoint(websocket: WebSocket):
                 await params.result_callback({"status": "success", "phone_number": phone_number, "message": f"Found {contact_name}."})
                 return
             error_msg = civicrm_lookup.format_disambiguation_message(contacts)
+            call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": error_msg}))
             await params.result_callback({"status": "error", "message": error_msg})
         except asyncio.TimeoutError:
+            call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": "Lookup timed out."}))
             await params.result_callback({"status": "error", "message": "Lookup timed out."})
         except Exception as e:
+            call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": str(e)}))
             await params.result_callback({"status": "error", "message": str(e)})
 
     async def get_membership_handler(params: FunctionCallParams):
         if not caller_contact_id:
+            call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": "I don't recognize your phone number."}))
             await params.result_callback({"status": "error", "message": "I don't recognize your phone number."})
             return
         info = await civicrm_agent.get_membership_info(caller_contact_id)
+        call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "success", "message": info}))
         await params.result_callback({"status": "success", "message": info})
 
     async def list_info_handler(params: FunctionCallParams):
         if not caller_contact_id:
+            call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": "Unrecognized caller."}))
             await params.result_callback({"status": "error", "message": "Unrecognized caller."})
             return
         summary = await civicrm_agent.list_contact_info(caller_contact_id)
+        call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "success", "message": summary}))
         await params.result_callback({"status": "success", "message": summary})
 
     async def add_address_handler(params: FunctionCallParams):
         if not caller_contact_id:
+            call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": "Unrecognized caller."}))
             await params.result_callback({"status": "error", "message": "Unrecognized caller."})
             return
         result = await civicrm_agent.add_address(caller_contact_id, params.arguments.get("street_address"), params.arguments.get("city"), params.arguments.get("postal_code"), params.arguments.get("is_primary", False))
+        call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "success", "message": result}))
         await params.result_callback({"status": "success", "message": result})
 
     async def add_phone_handler(params: FunctionCallParams):
         if not caller_contact_id:
+            call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": "Unrecognized caller."}))
             await params.result_callback({"status": "error", "message": "Unrecognized caller."})
             return
         result = await civicrm_agent.add_phone(caller_contact_id, params.arguments.get("phone_number"), params.arguments.get("is_primary", False))
+        call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "success", "message": result}))
         await params.result_callback({"status": "success", "message": result})
 
     async def add_email_handler(params: FunctionCallParams):
         if not caller_contact_id:
+            call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": "Unrecognized caller."}))
             await params.result_callback({"status": "error", "message": "Unrecognized caller."})
             return
         result = await civicrm_agent.add_email(caller_contact_id, params.arguments.get("email_address"), params.arguments.get("is_primary", False))
+        call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "success", "message": result}))
         await params.result_callback({"status": "success", "message": result})
 
     async def set_primary_handler(params: FunctionCallParams):
         if not caller_contact_id:
+            call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": "Unrecognized caller."}))
             await params.result_callback({"status": "error", "message": "Unrecognized caller."})
             return
         result = await civicrm_agent.set_primary_record(params.arguments.get("entity_type"), params.arguments.get("record_id"))
+        call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "success", "message": result}))
         await params.result_callback({"status": "success", "message": result})
 
     async def create_contact_handler(params: FunctionCallParams):
@@ -744,6 +769,7 @@ async def websocket_endpoint(websocket: WebSocket):
         BLOCKED_NAMES = {"unknown", "caller", "anonymous", "unavailable", "n/a", "none"}
         if first.lower() in BLOCKED_NAMES or last.lower() in BLOCKED_NAMES:
             call_logger.warning(f"Rejected sentinel contact name: {first} {last}")
+            call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": "That does not appear to be a real name. Please ask the caller for their actual first and last name."}))
             await params.result_callback({"status": "error", "message": "That does not appear to be a real name. Please ask the caller for their actual first and last name."})
             return
         
@@ -752,8 +778,10 @@ async def websocket_endpoint(websocket: WebSocket):
         if result_data["success"]:
             nonlocal caller_contact_id
             caller_contact_id = result_data["contact_id"]
+            call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "success", "message": result_data["message"]}))
             await params.result_callback({"status": "success", "message": result_data["message"]})
         else:
+            call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": result_data["message"]}))
             await params.result_callback({"status": "error", "message": result_data["message"]})
 
     async def ask_support_bot_handler(params: FunctionCallParams):
@@ -764,6 +792,7 @@ async def websocket_endpoint(websocket: WebSocket):
         
         if not goclaw_url or not goclaw_key:
             call_logger.error("GOCLAW_API_URL or GOCLAW_API_KEY not configured")
+            call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": "Support bot is not available right now."}))
             await params.result_callback({"status": "error", "message": "Support bot is not available right now."})
             return
         
@@ -838,6 +867,10 @@ async def websocket_endpoint(websocket: WebSocket):
         asyncio.create_task(_fetch_and_inject())
 
         # Return immediately to Pipecat framework so the bot can stall naturally
+        call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({
+            "status": "processing",
+            "instruction": "The support bot is looking this up now. If you have no answer to provide on your own, indicate the caller should wait by saying a phrase like 'Let me check on that for you' OR 'One moment.' OR 'Let me see... looking into that for you now.' OR 'just a sec.' The answer will arrive within 30 seconds and be provided to you automatically."
+        }))
         await params.result_callback({
             "status": "processing",
             "instruction": "The support bot is looking this up now. If you have no answer to provide on your own, indicate the caller should wait by saying a phrase like 'Let me check on that for you' OR 'One moment.' OR 'Let me see... looking into that for you now.' OR 'just a sec.' The answer will arrive within 30 seconds and be provided to you automatically."
@@ -870,6 +903,7 @@ async def websocket_endpoint(websocket: WebSocket):
         summary = params.arguments.get("summary", "")
         call_summaries[call_sid] = summary
         call_logger.info(f"Call summary updated ({len(summary)} chars)")
+        call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "ok"}))
         await params.result_callback({"status": "ok"})
 
     llm.register_function("update_call_summary", update_call_summary_handler, timeout_secs=0.2)
@@ -899,6 +933,7 @@ async def websocket_endpoint(websocket: WebSocket):
         user_aggregator,
         llm,
         assistant_aggregator,
+        metrics_logger,
         transport.output()
     ])
 

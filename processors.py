@@ -7,7 +7,8 @@ from pipecat.frames.frames import (
     TranscriptionFrame,
     LLMContextFrame,
     TextFrame,
-    AudioRawFrame
+    AudioRawFrame,
+    MetricsFrame
 )
 
 class SpeechTracker(FrameProcessor):
@@ -95,7 +96,7 @@ class SpeechTracker(FrameProcessor):
             # If a turn just became complete, log its output and add to the flat call_history
             if turn["status"] == "complete" and existing_status != "complete" and turn["output_text"]:
                 if self.call_logger:
-                    self.call_logger.debug(f"[Transcription:bot] [{turn['output_text']}]")
+                    self.call_logger.info(f"[Transcription:bot] [{turn['output_text']}]")
                 self.call_history.append(f"[Bot] {turn['output_text']}")
             
         self.tasks = new_tasks
@@ -123,9 +124,13 @@ class SpeechTracker(FrameProcessor):
 
         if isinstance(frame, BotStartedSpeakingFrame):
             self.is_speaking = True
+            if self.call_logger:
+                self.call_logger.info("Bot started speaking")
         elif isinstance(frame, BotStoppedSpeakingFrame):
             self.is_speaking = False
             self.first_utterance_finished = True
+            if self.call_logger:
+                self.call_logger.info("Bot stopped speaking")
             if self.current_task and self.current_task.get("status") == "in_progress":
                 self.current_task["status"] = "complete"
                 await self._trigger_update()
@@ -135,7 +140,7 @@ class SpeechTracker(FrameProcessor):
                 if frame.user_id == "user":
                     self.call_history.append(f"[User] {text}")
                     if self.call_logger:
-                        self.call_logger.debug(f"[Transcription:user] [{text}]")
+                        self.call_logger.info(f"[Transcription:user] [{text}]")
                     task_id = f"task_{len(self.tasks) + 1}"
                     self.current_task = {
                         "task_id": task_id,
@@ -149,7 +154,7 @@ class SpeechTracker(FrameProcessor):
                 else:
                     self.call_history.append(f"[Bot] {text}")
                     if self.call_logger:
-                        self.call_logger.debug(f"[Transcription:bot] [{text}]")
+                        self.call_logger.info(f"[Transcription:bot] [{text}]")
                     if self.current_task:
                         self.current_task["output_text"] = text
                         await self._trigger_update()
@@ -163,6 +168,23 @@ class SpeechTracker(FrameProcessor):
                 self.sync_from_context(frame.context.messages)
                 await self._trigger_update()
 
+        await self.push_frame(frame, direction)
+
+
+class MetricsLogger(FrameProcessor):
+    """
+    Custom Pipecat FrameProcessor for extracting and logging token usage metrics natively.
+    """
+    def __init__(self, call_logger):
+        super().__init__()
+        self.call_logger = call_logger
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, MetricsFrame):
+            if self.call_logger:
+                # Stringify the frame data naturally
+                self.call_logger.info(f"Metrics: {frame}")
         await self.push_frame(frame, direction)
 
 
