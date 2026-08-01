@@ -668,6 +668,17 @@ async def websocket_endpoint(websocket: WebSocket):
             call_logger.info(f"Sending tool result to Gemini Live for function={args.function_name}, tool_result_message=" + str({"status": "error"}))
             await args.result_callback({"status": "error", "message": f"The phone number {phone_number} appears to be invalid. Please use lookup_contact to find the real phone number first. Again: THE CALL IS NOT BEING TRANSFERRED. DO NOT WAIT IN SILENCE - LOOK UP THE CONTACT AGAIN OR TELL THE USER WHAT HAPPENED."})
             return
+
+        # Guard against transferring to our own number
+        destination_number = call_data.get("destination_number", "")
+        if destination_number and phone_number:
+            clean_phone = ''.join(filter(str.isdigit, phone_number))
+            clean_dest = ''.join(filter(str.isdigit, destination_number))
+            if clean_phone[-10:] == clean_dest[-10:]:
+                call_logger.warning(f"Rejected transfer to own number: {phone_number}")
+                call_logger.info(f"Sending tool result to Gemini Live for function={args.function_name}, tool_result_message=" + str({"status": "error"}))
+                await args.result_callback({"status": "error", "message": "You attempted to transfer the caller to our own phone number! You must use lookup_contact to find the correct phone number for this person first. THE CALL IS NOT BEING TRANSFERRED."})
+                return
         
         call_logger.info(f"Transferring call for {call_data['call_id']} to {contact_name} at {phone_number}")
         
@@ -709,6 +720,15 @@ async def websocket_endpoint(websocket: WebSocket):
         except asyncio.TimeoutError:
             call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": "Lookup timed out."}))
             await params.result_callback({"status": "error", "message": "Lookup timed out."})
+        except asyncio.CancelledError:
+            call_logger.warning(f"Tool {params.function_name} was cancelled by user interruption.")
+            async def send_cancel_msg():
+                try:
+                    await params.result_callback({"status": "error", "message": "The user interrupted you before this tool could finish. The tool execution was cancelled. You MUST run the tool again if you still need the information!"})
+                except Exception:
+                    pass
+            asyncio.create_task(send_cancel_msg())
+            raise
         except Exception as e:
             call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": str(e)}))
             await params.result_callback({"status": "error", "message": str(e)})
@@ -718,18 +738,44 @@ async def websocket_endpoint(websocket: WebSocket):
             call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": "I don't recognize your phone number."}))
             await params.result_callback({"status": "error", "message": "I don't recognize your phone number."})
             return
-        info = await civicrm_agent.get_membership_info(caller_contact_id)
-        call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "success", "message": info}))
-        await params.result_callback({"status": "success", "message": info})
+        try:
+            info = await civicrm_agent.get_membership_info(caller_contact_id)
+            call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "success", "message": info}))
+            await params.result_callback({"status": "success", "message": info})
+        except asyncio.CancelledError:
+            call_logger.warning(f"Tool {params.function_name} was cancelled by user interruption.")
+            async def send_cancel_msg():
+                try:
+                    await params.result_callback({"status": "error", "message": "The user interrupted you before this tool could finish. The tool execution was cancelled. You MUST run the tool again if you still need the information!"})
+                except Exception:
+                    pass
+            asyncio.create_task(send_cancel_msg())
+            raise
+        except Exception as e:
+            call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": str(e)}))
+            await params.result_callback({"status": "error", "message": str(e)})
 
     async def list_info_handler(params: FunctionCallParams):
         if not caller_contact_id:
             call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": "Unrecognized caller."}))
             await params.result_callback({"status": "error", "message": "Unrecognized caller."})
             return
-        summary = await civicrm_agent.list_contact_info(caller_contact_id)
-        call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "success", "message": summary}))
-        await params.result_callback({"status": "success", "message": summary})
+        try:
+            summary = await civicrm_agent.list_contact_info(caller_contact_id)
+            call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "success", "message": summary}))
+            await params.result_callback({"status": "success", "message": summary})
+        except asyncio.CancelledError:
+            call_logger.warning(f"Tool {params.function_name} was cancelled by user interruption.")
+            async def send_cancel_msg():
+                try:
+                    await params.result_callback({"status": "error", "message": "The user interrupted you before this tool could finish. The tool execution was cancelled. You MUST run the tool again if you still need the information!"})
+                except Exception:
+                    pass
+            asyncio.create_task(send_cancel_msg())
+            raise
+        except Exception as e:
+            call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": str(e)}))
+            await params.result_callback({"status": "error", "message": str(e)})
 
     async def add_address_handler(params: FunctionCallParams):
         if not caller_contact_id:
