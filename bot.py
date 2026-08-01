@@ -212,7 +212,7 @@ async def post_bot(request: Request):
         
         twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
         <Response>
-            <Dial ringTone="us">{target_number}</Dial>
+            <Dial ringTone="us" timeout="60">{target_number}</Dial>
         </Response>"""
         return Response(content=twiml_response, media_type="application/xml")
         
