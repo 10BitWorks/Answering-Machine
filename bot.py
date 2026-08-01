@@ -149,6 +149,9 @@ async def twiml(request: Request):
     from_number = data.get("From", "Unknown Caller")
     to_number = data.get("To", "Unknown")
     caller_name = data.get("CallerName", "")
+    caller_city = data.get("FromCity", "")
+    caller_state = data.get("FromState", "")
+    caller_zip = data.get("FromZip", "")
         
     twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
@@ -160,6 +163,9 @@ async def twiml(request: Request):
                 <Parameter name="caller_number" value="{from_number}" />
                 <Parameter name="destination_number" value="{to_number}" />
                 <Parameter name="caller_name" value="{caller_name}" />
+                <Parameter name="caller_city" value="{caller_city}" />
+                <Parameter name="caller_state" value="{caller_state}" />
+                <Parameter name="caller_zip" value="{caller_zip}" />
             </Stream>
         </Connect>
         <Redirect method="POST">https://{host}/post_bot</Redirect>
