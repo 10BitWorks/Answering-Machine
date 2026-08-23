@@ -363,9 +363,21 @@ async def websocket_endpoint(websocket: WebSocket):
     # Set up per-call logging
     Path("logs").mkdir(exist_ok=True)
     log_file = f"logs/call_{call_sid}.log"
+    def clean_log_filter(record):
+        if record["extra"].get("call_id") != call_sid:
+            return False
+        
+        msg = record["message"]
+        if msg.startswith("Setting system instruction:"):
+            return False
+        if msg.startswith("Setting tools:"):
+            return False
+        
+        return True
+
     handler_id = logger.add(
-        log_file, 
-        filter=lambda record: record["extra"].get("call_id") == call_sid,
+        log_file,
+        filter=clean_log_filter,
         format="{time} | {level: <8} | {message}",
         level="DEBUG" # Keep debug on for call files to catch jitter
     )
@@ -671,7 +683,7 @@ async def websocket_endpoint(websocket: WebSocket):
             return
 
         # Guard against transferring to our own number
-        destination_number = call_data.get("destination_number", "")
+        destination_number = call_data.get("body", {}).get("destination_number", "")
         if destination_number and phone_number:
             clean_phone = ''.join(filter(str.isdigit, phone_number))
             clean_dest = ''.join(filter(str.isdigit, destination_number))
