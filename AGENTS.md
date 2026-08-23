@@ -120,3 +120,23 @@ I will modify the SYSTEM_PROMPT file myself. You may suggest, but don't touch it
 *   **Native Audio Models vs TextFrames**: Native multimodal models (like `GeminiLiveLLMService`) do not use a separate TTS engine. They output `AudioRawFrame`s directly and **NEVER** emit `TextFrame`s downstream! If you attempt to capture the bot's speech by intercepting `TextFrame`s in a custom processor, your variables will remain silently empty.
 *   **The Dropped Interrupted Context**: When the bot is interrupted, Pipecat's context aggregator completely drops the text buffer. Relying on `LLMContextFrame` to capture the bot's speech means you will silently lose all apologies or partially-spoken sentences that were interrupted.
 *   **Webhook Pipeline Cancellation Pattern**: The correct code pattern to force a Pipecat pipeline to tear down instantly when an external webhook (like Twilio's `/recording-callback`) signals the call is over is to store the `PipelineTask` globally (e.g., in `active_calls[call_sid]["task"]`), then have the webhook endpoint inject `asyncio.create_task(task.queue_frames([CancelTaskFrame()]))`. This forcefully bypasses any `audio_out_auto_silence` delays or `idle_timeout` hangs.
+
+## 19. `call_data` Dictionary Structure
+*   **Nested `body` Dict**: Twilio metadata (`destination_number`, `caller_number`, `caller_name`, `caller_city`, `caller_state`, `caller_zip`) is nested under `call_data["body"]`, not at the top level. The top level contains only `call_id`, `stream_id`, and `body`. Any code accessing caller/destination fields must use `call_data.get("body", {}).get("field_name", "")`.
+*   **Historical Bug**: A guard rail in `transfer_call_handler` used `call_data.get("destination_number")` (top-level), which always returned `""`, silently disabling the self-transfer check. This allowed the bot to transfer callers to the bot's own phone number, creating an infinite loop where the caller was forced to restart the conversation from scratch. Fixed Aug 2026.
+
+## 20. Call Log Investigation Protocol
+*   **Before Investigating**: Read `SYSTEM_PROMPT.md` (which includes the full knowledge base from `knowledgebase/`) to understand the bot's intended behavior before judging whether a call went well or poorly.
+*   **Quick Log Access**: Production call logs are on the host filesystem at a stable path (not inside the container, which has a random name that changes on each deploy):
+    ```
+    ssh ubuntu@10bit.works "cat /data/coolify/applications/o5lajf9uajiwd8ntwtge2siz/logs/call_<CALL_SID>.log"
+    ```
+    To list recent calls: `ssh ubuntu@10bit.works "ls -lt /data/coolify/applications/o5lajf9uajiwd8ntwtge2siz/logs/ | head -n 10"`
+*   **Cross-Reference Phone Numbers**: For every `transfer_call` tool invocation in the logs, compare the `phone_number` argument against the bot's own `destination_number` from the `Accepted twilio call` line. If they match, the bot attempted a self-transfer.
+*   **Detect Looped Callers**: Look for multiple `Accepted twilio call` lines with the same `caller_number` in rapid succession (seconds apart). This means the caller was transferred back to the bot and forced to restart.
+*   **Listen Before Theorizing**: When asked to review a call recording, describe what you hear chronologically across the full recording *before* forming any theory. Do not invent observations — if you aren't sure what was said, say so.
+
+## 21. Multi-Session Recordings
+*   **One Recording, Multiple Bot Sessions**: A single Twilio recording can span multiple bot sessions if the caller gets transferred back to the bot (e.g., via a self-transfer or a Studio flow redirect after a failed dial). The caller never hung up, so Twilio kept recording.
+*   **Signs**: A second greeting mid-recording, a different bot voice (each session picks a random voice), and a new `call_id` in the logs from the same `caller_number` appearing seconds after a `transfer_call` or `post_bot` entry.
+*   **Root Cause**: This almost always means the bot transferred the caller to its own number (see §19) or a Studio flow redirect looped back to the bot after a failed `<Dial>`.
