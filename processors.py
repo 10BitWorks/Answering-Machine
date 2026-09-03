@@ -8,8 +8,12 @@ from pipecat.frames.frames import (
     LLMContextFrame,
     TextFrame,
     AudioRawFrame,
-    MetricsFrame
+    MetricsFrame,
+    TTSAudioRawFrame,
+    TTSStoppedFrame,
+    InterruptionFrame,
 )
+from loguru import logger
 
 class SpeechTracker(FrameProcessor):
     """
@@ -202,4 +206,93 @@ class CallerMuter(FrameProcessor):
         # Mute caller audio until the bot finishes its first utterance
         if not self.tracker.first_utterance_finished and isinstance(frame, AudioRawFrame) and direction == FrameDirection.DOWNSTREAM:
             return  # Drop caller audio
+        await self.push_frame(frame, direction)
+
+
+class JitterBufferProcessor(FrameProcessor):
+    """Buffers the first N milliseconds of each bot utterance before releasing
+    them to the transport, creating a head-start that absorbs Gemini's
+    generation jitter.
+
+    The FastAPI WebSocket transport drains its audio queue at 2x real-time
+    (send_interval = chunk_duration / 2).  Without buffering, even a brief
+    stutter in Gemini's audio generation starves the queue and produces an
+    audible gap on the phone.  By holding back the initial burst and then
+    flushing it all at once, the transport's pacing loop naturally builds a
+    backlog that acts as a continuous jitter buffer for the rest of the
+    utterance.
+
+    Non-audio frames always pass through immediately.
+    """
+
+    # States
+    _STATE_WAITING = "waiting"      # No audio yet, waiting for first frame
+    _STATE_BUFFERING = "buffering"  # Accumulating initial audio
+    _STATE_PASSTHROUGH = "passing"  # Buffer flushed, passing frames directly
+
+    def __init__(self, buffer_ms: int = 200, sample_rate: int = 8000, call_logger=None):
+        super().__init__()
+        self._buffer_ms = buffer_ms
+        self._sample_rate = sample_rate
+        self._call_logger = call_logger
+        # 16-bit mono PCM: 2 bytes per sample
+        self._threshold_bytes = int(sample_rate * 2 * (buffer_ms / 1000))
+        self._reset()
+
+    def _reset(self):
+        """Reset to the waiting state for a new utterance."""
+        self._state = self._STATE_WAITING
+        self._audio_buffer = bytearray()
+        self._buffered_frames: list[TTSAudioRawFrame] = []
+
+    async def _flush_buffer(self):
+        """Release all buffered audio frames downstream."""
+        if self._buffered_frames:
+            if self._call_logger:
+                self._call_logger.debug(
+                    f"JitterBuffer: flushing {len(self._audio_buffer)} bytes "
+                    f"({len(self._buffered_frames)} frames) after "
+                    f"{len(self._audio_buffer) / (self._sample_rate * 2) * 1000:.0f}ms"
+                )
+            for frame in self._buffered_frames:
+                await self.push_frame(frame, FrameDirection.DOWNSTREAM)
+            self._audio_buffer = bytearray()
+            self._buffered_frames = []
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        # --- Reset triggers (upstream or downstream) ---
+        if isinstance(frame, (TTSStoppedFrame, InterruptionFrame)):
+            if self._state == self._STATE_BUFFERING:
+                # Flush whatever we have so it isn't lost
+                await self._flush_buffer()
+            self._reset()
+            await self.push_frame(frame, direction)
+            return
+
+        # --- Only buffer downstream TTS audio ---
+        if isinstance(frame, TTSAudioRawFrame) and direction == FrameDirection.DOWNSTREAM:
+            if self._state == self._STATE_WAITING:
+                self._state = self._STATE_BUFFERING
+                if self._call_logger:
+                    self._call_logger.debug(
+                        f"JitterBuffer: started buffering (threshold={self._threshold_bytes}B / {self._buffer_ms}ms)"
+                    )
+
+            if self._state == self._STATE_BUFFERING:
+                self._audio_buffer.extend(frame.audio)
+                self._buffered_frames.append(frame)
+
+                if len(self._audio_buffer) >= self._threshold_bytes:
+                    # Threshold met — flush everything and switch to passthrough
+                    await self._flush_buffer()
+                    self._state = self._STATE_PASSTHROUGH
+                return  # Don't push yet while buffering
+
+            # _STATE_PASSTHROUGH — let it through immediately
+            await self.push_frame(frame, direction)
+            return
+
+        # --- Everything else passes through unchanged ---
         await self.push_frame(frame, direction)
