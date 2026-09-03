@@ -13,6 +13,7 @@ services:
       start_period: 10s
     volumes:
       - ./logs:/app/logs
+      - ./knowledgebase:/app/knowledgebase
     logging:
       driver: "json-file"
       options:

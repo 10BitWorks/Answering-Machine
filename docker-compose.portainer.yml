@@ -11,6 +11,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./logs:/app/logs
+      - ./knowledgebase:/app/knowledgebase
     logging:
       driver: "json-file"
       options:

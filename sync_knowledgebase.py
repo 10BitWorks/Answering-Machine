@@ -49,6 +49,8 @@ def main():
         print("No answer IDs found.")
         return
 
+    written_files = []
+    
     for aid in answer_ids:
         print(f"Fetching Answer ID: {aid}...")
         answer_url = f"{BASE_URL}/knowledge_bases/1/answers/{aid}?include_contents={aid}"
@@ -85,7 +87,8 @@ def main():
             if not safe_title or safe_title == "_":
                 safe_title = f"Answer_{aid}"
             
-            file_path = os.path.join(OUTPUT_DIR, f"{safe_title}.md")
+            filename = f"{safe_title}.md"
+            file_path = os.path.join(OUTPUT_DIR, filename)
             
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write("---\n")
@@ -95,10 +98,27 @@ def main():
                 f.write("---\n\n")
                 f.write(body_md)
             
+            written_files.append(filename)
             print(f"Saved {file_path}")
             
         except Exception as e:
             print(f"Error fetching answer {aid}: {e}")
+
+    # Check for sync success or fatal failure
+    existing_md_files = [f for f in os.listdir(OUTPUT_DIR) if f.endswith(".md")]
+    
+    if len(written_files) == 0:
+        if len(existing_md_files) == 0:
+            raise RuntimeError("Fatal error: Failed to sync any knowledge base articles and no local cache exists.")
+        else:
+            print("Warning: Failed to sync any knowledge base articles, but a local cache exists. Retaining stale files.")
+    else:
+        # Cleanup stale files that were deleted in Zammad
+        for f in existing_md_files:
+            if f not in written_files:
+                stale_path = os.path.join(OUTPUT_DIR, f)
+                os.remove(stale_path)
+                print(f"Deleted stale file: {stale_path}")
 
 if __name__ == "__main__":
     main()
