@@ -126,13 +126,20 @@ try:
     
     if KNOWLEDGEBASE_DIR.exists():
         kb_content = "\n\n# KNOWLEDGE BASE\n"
+        kb_files_count = 0
         for md_file in KNOWLEDGEBASE_DIR.glob("**/*.md"):
             with open(md_file, "r") as f:
                 kb_content += f"\n\n## {md_file.name}\n"
                 kb_content += f.read()
+            kb_files_count += 1
+            
+        if kb_files_count == 0:
+            logger.error("FATAL ERROR: Zero knowledge base articles found! The assistant cannot run safely.")
+            sys.exit(1)
+            
         SYSTEM_PROMPT += kb_content
         
-    logger.info(f"Loaded system prompt and knowledgebase. Total length: {len(SYSTEM_PROMPT)}")
+    logger.info(f"Loaded system prompt with {kb_files_count} KB articles. Total length: {len(SYSTEM_PROMPT)}")
 except Exception as e:
     logger.error(f"Failed to load system prompt or knowledgebase: {e}")
     sys.exit(1)
@@ -444,22 +451,22 @@ async def websocket_endpoint(websocket: WebSocket):
             ),
             FunctionSchema(
                 name="transfer_call",
-                description="Transfer the current call to another phone number. Use this when the user asks to speak to a specific person. Always wait for the caller's verbal agreement to being transferred before calling the tool.",
+                description="Transfer the current call to another person. Use this when the user asks to speak to a specific person. Always wait for the caller's verbal agreement to being transferred before calling the tool.",
                 properties={
-                    "phone_number": {
-                        "type": "string",
-                        "description": "The E.164 formatted phone number to transfer to (e.g. +12105551212)."
+                    "phone_id": {
+                        "type": "integer",
+                        "description": "The CiviCRM phone record ID returned by lookup_contact. You MUST get this from a successful lookup_contact call — never fabricate it."
                     },
                     "contact_name": {
                         "type": "string",
                         "description": "The name of the person being transferred to (e.g. Greg)."
                     }
                 },
-                required=["phone_number", "contact_name"]
+                required=["phone_id", "contact_name"]
             ),
             FunctionSchema(
                 name="lookup_contact",
-                description="Look up a contact name in the CiviCRM database to get their phone number. This does NOT transfer the call. You must use transfer_call with the resulting phone number to actually transfer.",
+                description="Look up a contact name in the CiviCRM database to get their phone_id. This does NOT transfer the call. You must use transfer_call with the resulting phone_id to actually transfer.",
                 properties={
                     "contact_name": {
                         "type": "string",
@@ -482,12 +489,13 @@ async def websocket_endpoint(websocket: WebSocket):
             ),
             FunctionSchema(
                 name="create_my_contact_record",
-                description="Creates a new contact record for the current caller in our database. Use this IMMEDIATELY after an unrecognized caller has provided their first and last name, so that we can accurately log their inquiry. Use your judgement to ensure you've been provided a real name, not unrelated words. If in doubt, confirm with the caller first.",
+                description="Creates a new contact record. For individuals, provide first_name and last_name. For organizations/businesses, provide organization_name instead. Use your judgment to determine whether the caller's name is a person or a business.",
                 properties={
-                    "first_name": {"type": "string", "description": "The caller's first name."},
-                    "last_name": {"type": "string", "description": "The caller's last name."}
+                    "first_name": {"type": "string", "description": "The caller's first name. (Required for individuals)"},
+                    "last_name": {"type": "string", "description": "The caller's last name. (Required for individuals)"},
+                    "organization_name": {"type": "string", "description": "The name of the business or organization. (Required for organizations)"}
                 },
-                required=["first_name", "last_name"]
+                required=[]
             ),
             FunctionSchema(
                 name="add_new_address",
@@ -576,10 +584,15 @@ async def websocket_endpoint(websocket: WebSocket):
 
     call_turn_tasks[call_sid] = []
     if caller_name:
-        caller_name = caller_name.strip().title()
-        caller_first_name = caller_name.split()[0] if caller_name.split() else caller_name
-    else:
-        caller_first_name = ""
+        caller_name = caller_name.strip()
+        if "," in caller_name:
+            parts = [p.strip().title() for p in caller_name.split(",")]
+            if len(parts) >= 2:
+                caller_name = f"{parts[1]} {parts[0]}"
+            else:
+                caller_name = caller_name.title()
+        else:
+            caller_name = caller_name.title()
     caller_display_name = caller_name if caller_name else caller_number
     crm_url = None
 
@@ -672,14 +685,23 @@ async def websocket_endpoint(websocket: WebSocket):
 
     async def transfer_call_handler(args: FunctionCallParams):
         nonlocal is_terminating
-        phone_number = args.arguments.get("phone_number")
+        phone_id = args.arguments.get("phone_id")
         contact_name = args.arguments.get("contact_name", "a volunteer")
         
+        if phone_id is None:
+            await args.result_callback({"status": "error", "message": "You must provide a valid phone_id from lookup_contact."})
+            return
+            
+        phone_number = await civicrm_lookup.resolve_phone_id(phone_id)
+        if not phone_number:
+            await args.result_callback({"status": "error", "message": "That phone_id is invalid or missing. Please use lookup_contact to find the correct phone_id first."})
+            return
+            
         # Guard against hallucinated/placeholder phone numbers (e.g. from cancelled lookups)
         if phone_number and "555" in phone_number.replace("-", "").replace(" ", ""):
             call_logger.warning(f"Rejected hallucinated phone number: {phone_number}")
             call_logger.info(f"Sending tool result to Gemini Live for function={args.function_name}, tool_result_message=" + str({"status": "error"}))
-            await args.result_callback({"status": "error", "message": f"The phone number {phone_number} appears to be invalid. Please use lookup_contact to find the real phone number first. Again: THE CALL IS NOT BEING TRANSFERRED. DO NOT WAIT IN SILENCE - LOOK UP THE CONTACT AGAIN OR TELL THE USER WHAT HAPPENED."})
+            await args.result_callback({"status": "error", "message": f"The phone number appears to be invalid. Please use lookup_contact again."})
             return
 
         # Guard against transferring to our own number
@@ -690,7 +712,7 @@ async def websocket_endpoint(websocket: WebSocket):
             if clean_phone[-10:] == clean_dest[-10:]:
                 call_logger.warning(f"Rejected transfer to own number: {phone_number}")
                 call_logger.info(f"Sending tool result to Gemini Live for function={args.function_name}, tool_result_message=" + str({"status": "error"}))
-                await args.result_callback({"status": "error", "message": "You attempted to transfer the caller to our own phone number! You must use lookup_contact to find the correct phone number for this person first. THE CALL IS NOT BEING TRANSFERRED."})
+                await args.result_callback({"status": "error", "message": "You attempted to transfer the caller to our own phone number! You must use lookup_contact to find the correct contact first. THE CALL IS NOT BEING TRANSFERRED."})
                 return
         
         call_logger.info(f"Transferring call for {call_data['call_id']} to {contact_name} at {phone_number}")
@@ -723,9 +745,9 @@ async def websocket_endpoint(websocket: WebSocket):
             contacts = await asyncio.wait_for(civicrm_lookup.lookup_contact_by_name(contact_name), timeout=4.5)
             if len(contacts) == 1 and len(contacts[0]["phones"]) == 1:
                 contact = contacts[0]
-                phone_number = contact["phones"][0]["number"]
-                logger.info(f"Unique match found for {contact_name}: {phone_number}.")
-                await params.result_callback({"status": "success", "phone_number": phone_number, "message": f"Found {contact_name}."})
+                phone = contact["phones"][0]
+                logger.info(f"Unique match found for {contact_name}: phone_id={phone['id']}.")
+                await params.result_callback({"status": "success", "phone_id": phone["id"], "display": f"{contact['display_name']} - {phone['label']}", "message": f"Found {contact_name}."})
                 return
             error_msg = civicrm_lookup.format_disambiguation_message(contacts)
             call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": error_msg}))
@@ -829,6 +851,7 @@ async def websocket_endpoint(websocket: WebSocket):
     async def create_contact_handler(params: FunctionCallParams):
         first = (params.arguments.get("first_name") or "").strip()
         last = (params.arguments.get("last_name") or "").strip()
+        org = (params.arguments.get("organization_name") or "").strip()
         
         # Guard against sentinel/placeholder names that Gemini may hallucinate
         BLOCKED_NAMES = {"unknown", "caller", "anonymous", "unavailable", "n/a", "none"}
@@ -838,8 +861,9 @@ async def websocket_endpoint(websocket: WebSocket):
             await params.result_callback({"status": "error", "message": "That does not appear to be a real name. Please ask the caller for their actual first and last name."})
             return
         
-        logger.info(f"Bot creating new contact: {first} {last} for number {caller_number}")
-        result_data = await civicrm_agent.create_contact(first, last, caller_number)
+        name_str = f"{first} {last}".strip() if (first or last) else org
+        logger.info(f"Bot creating new contact: {name_str} for number {caller_number}")
+        result_data = await civicrm_agent.create_contact(first, last, caller_number, org)
         if result_data["success"]:
             nonlocal caller_contact_id
             caller_contact_id = result_data["contact_id"]
@@ -1026,8 +1050,8 @@ async def websocket_endpoint(websocket: WebSocket):
         
         detail_block = ""
         if caller_name:
-            detail_block = f"CURRENT CALLER INFO: Unrecognized caller identified via CNAM as {caller_name}."
-            greeting = f"'You've reached the answering machine for 10BitWorks -- San Antonio's largest member-supported makerspace! Am I speaking with {caller_first_name}?'"
+            detail_block = f"CURRENT CALLER INFO: Unrecognized caller identified via CNAM as {caller_name}. This may be a person's name or a business name — use your judgment."
+            greeting = f"'You've reached the answering machine for 10BitWorks -- San Antonio's largest member-supported makerspace! Am I speaking with {caller_name}?'"
         else:
             greeting = "'You've reached the answering machine for 10BitWorks -- San Antonio's largest member-supported makerspace! Who am I speaking with today?'"
         

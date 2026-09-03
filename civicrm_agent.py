@@ -161,16 +161,24 @@ async def set_primary_record(entity: str, record_id: int):
     data = await _call_api(entity, "save", params)
     return f"{entity} updated to primary." if not data.get("is_error") else f"Error: {data.get('error_message')}"
 
-async def create_contact(first_name: str, last_name: str, phone_number: str):
+async def create_contact(first_name: str, last_name: str, phone_number: str, organization_name: str = None):
     """
-    Creates a new Individual contact and associates the phone number if valid.
+    Creates a new contact (Individual or Organization) and associates the phone number if valid.
     """
+    record = {}
+    if first_name or last_name:
+        record["contact_type"] = "Individual"
+        record["first_name"] = first_name
+        record["last_name"] = last_name
+        # If both are provided, we could create an org relationship, but for now just note it in a custom field or let it be.
+    elif organization_name:
+        record["contact_type"] = "Organization"
+        record["organization_name"] = organization_name
+    else:
+        return {"success": False, "message": "Must provide either name or organization_name"}
+        
     params = {
-        "records": [{
-            "contact_type": "Individual",
-            "first_name": first_name,
-            "last_name": last_name
-        }]
+        "records": [record]
     }
     data = await _call_api("Contact", "save", params)
     if data.get("is_error") or not data.get("values"):

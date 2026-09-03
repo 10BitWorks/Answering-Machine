@@ -26,7 +26,7 @@ async def lookup_contact_by_name(full_name: str):
         "Content-Type": "application/x-www-form-urlencoded"
     }
     
-    # APIv4 query with chaining for Phone records
+    # First try exact match
     params = {
         "select": ["display_name", "first_name", "last_name"],
         "where": [["display_name", "=", full_name]],
@@ -34,12 +34,11 @@ async def lookup_contact_by_name(full_name: str):
         "chain": {
             "phones": ["Phone", "get", {
                 "where": [["contact_id", "=", "$id"]],
-                "select": ["phone", "location_type_id:label", "is_primary"]
+                "select": ["id", "phone", "location_type_id:label", "is_primary"]
             }]
         }
     }
     
-    # CiviCRM REST often expects 'params' as a form field containing JSON
     body = {
         "api_key": api_key,
         "key": site_key,
@@ -54,6 +53,17 @@ async def lookup_contact_by_name(full_name: str):
             
             if data.get("is_error"):
                 logger.error(f"CiviCRM API error: {data.get('error_message')}")
+                return []
+            
+            # If exact match yields 0, try CONTAINS
+            if not data.get("values"):
+                params["where"] = [["display_name", "CONTAINS", full_name]]
+                body["params"] = json.dumps(params)
+                response = await client.post(url, headers=headers, data=body)
+                response.raise_for_status()
+                data = response.json()
+            
+            if data.get("is_error") or not data.get("values"):
                 return []
             
             contacts = []
@@ -78,7 +88,7 @@ async def lookup_contact_by_name(full_name: str):
                         if dedup_phone not in seen_numbers:
                             seen_numbers.add(dedup_phone)
                             contact["phones"].append({
-                                "number": clean_phone,
+                                "id": phone_rec.get("id"),
                                 "label": phone_rec.get("location_type_id:label", "Other"),
                                 "is_primary": phone_rec.get("is_primary", False)
                             })
@@ -96,11 +106,17 @@ def format_disambiguation_message(contacts):
     Helps format a message for the LLM when multiple options are found.
     """
     if not contacts:
-        return "No contact found with that exact name."
+        return "No contact found with that name."
     
     if len(contacts) > 1:
-        names = [c["display_name"] for c in contacts]
-        return f"I found multiple contacts matching that name: {', '.join(names)}. Could you be more specific?"
+        details = []
+        for i, c in enumerate(contacts, 1):
+            phone_labels = [f"{p['label']} [phone_id={p['id']}]" for p in c['phones']]
+            if phone_labels:
+                details.append(f"({i}) {c['display_name']} with {', '.join(phone_labels)}")
+            else:
+                details.append(f"({i}) {c['display_name']} (no phone)")
+        return f"I found multiple contacts matching that name: {', '.join(details)}. Could you be more specific about which one?"
     
     contact = contacts[0]
     phones = contact["phones"]
@@ -112,8 +128,51 @@ def format_disambiguation_message(contacts):
         return None # Success!
     
     # Multiple phones for one contact
-    options = [f"{p['label']}: {p['number']}" for p in phones]
+    options = [f"{p['label']} [phone_id={p['id']}]" for p in phones]
     return f"I found multiple numbers for {contact['display_name']}: {', '.join(options)}. Which one should I call?"
+
+async def resolve_phone_id(phone_id: int) -> str | None:
+    """
+    Resolves a CiviCRM Phone record ID to its actual phone number string.
+    """
+    url = os.getenv("CIVICRM_API_URL")
+    if not url:
+        return None
+    url = url.replace("Contact/get", "Phone/get")
+    if not url.endswith("Phone/get"):
+        url = url.rstrip("/") + "/Phone/get"
+        
+    api_key = os.getenv("CIVICRM_API_KEY")
+    site_key = os.getenv("CIVICRM_SITE_KEY")
+    
+    headers = {
+        "X-Requested-With": "XMLHttpRequest",
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+    
+    params = {
+        "select": ["phone"],
+        "where": [["id", "=", phone_id]],
+        "limit": 1
+    }
+    
+    body = {
+        "api_key": api_key,
+        "key": site_key,
+        "params": json.dumps(params)
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=4.5) as client:
+            response = await client.post(url, headers=headers, data=body)
+            response.raise_for_status()
+            data = response.json()
+            if data.get("is_error") or not data.get("values"):
+                return None
+            return data["values"][0].get("phone")
+    except Exception as e:
+        logger.error(f"Failed to resolve phone ID: {e}")
+        return None
 
 async def lookup_contact_by_phone(phone_number: str):
     """
