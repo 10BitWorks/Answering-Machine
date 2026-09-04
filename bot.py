@@ -1015,7 +1015,7 @@ async def websocket_endpoint(websocket: WebSocket):
     speech_tracker.context = context
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(context)
 
-    jitter_buffer = JitterBufferProcessor(buffer_ms=200, sample_rate=8000, call_logger=call_logger)
+    jitter_buffer = JitterBufferProcessor(buffer_ms=1000, sample_rate=8000, call_logger=call_logger)
 
     pipeline = Pipeline([
         transport.input(),
