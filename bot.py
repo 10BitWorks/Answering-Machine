@@ -424,7 +424,7 @@ async def websocket_endpoint(websocket: WebSocket):
             audio_out_enabled=True,
             add_wav_header=False,
             serializer=serializer,
-            fixed_audio_packet_size=320,
+            audio_out_10ms_chunks=2,
             audio_out_auto_silence=False,
             audio_out_sample_rate=8000
         )
@@ -1015,7 +1015,7 @@ async def websocket_endpoint(websocket: WebSocket):
     speech_tracker.context = context
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(context)
 
-    jitter_buffer = JitterBufferProcessor(buffer_ms=1000, sample_rate=8000, call_logger=call_logger)
+    jitter_buffer = JitterBufferProcessor(buffer_ms=200, sample_rate=8000, call_logger=call_logger)
 
     pipeline = Pipeline([
         transport.input(),
