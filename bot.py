@@ -511,7 +511,7 @@ async def websocket_endpoint(websocket: WebSocket):
             ),
             FunctionSchema(
                 name="create_my_contact_record",
-                description="Creates a new contact record. For individuals, provide first_name and last_name. For organizations/businesses, provide organization_name instead. Use your judgment to determine whether the caller's name is a person or a business.",
+                description="Creates a new contact record. For individuals, provide first_name and last_name. For organizations/businesses, provide organization_name instead. Use your judgment to determine whether the caller's name is a person or a business. CRITICAL: Before calling this tool, you MUST ask the caller for the proper spelling of their name IF AND ONLY IF (a) the name they gave does not align with the Caller ID, AND (b) the spelling of their name is not obvious.",
                 properties={
                     "first_name": {"type": "string", "description": "The caller's first name. (Required for individuals)"},
                     "last_name": {"type": "string", "description": "The caller's last name. (Required for individuals)"},
