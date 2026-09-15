@@ -44,17 +44,22 @@ async def get_membership_info(contact_id: int):
     }
     data = await _call_api("Membership", "get", params)
     if data.get("is_error") or not data.get("values"):
-        return "No active membership records found."
+        return "No active membership records found.", False
+    
+    is_active = False
+    active_statuses = ["New", "Current", "Grace"]
     
     summary = "Membership status:\n"
     for m in data["values"]:
         status = m.get("status_id:label", "Unknown")
+        if status in active_statuses:
+            is_active = True
         m_type = m.get("membership_type_id:label", "Unknown")
         join_date = m.get("join_date", "N/A")
         start_date = m.get("start_date", "N/A")
         end_date = m.get("end_date", "N/A")
         summary += f"- {m_type}: {status} (Joined: {join_date}, Started: {start_date}, Expires: {end_date})\n"
-    return summary
+    return summary, is_active
 
 async def list_contact_info(contact_id: int):
     """

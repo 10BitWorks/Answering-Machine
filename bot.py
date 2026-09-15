@@ -1101,7 +1101,11 @@ async def websocket_endpoint(websocket: WebSocket):
             )
             
             # Handle potential exceptions gracefully
-            membership = str(membership) if not isinstance(membership, Exception) else "Membership data unavailable."
+            if isinstance(membership, Exception):
+                membership_str, is_active_member = "Membership data unavailable.", False
+            else:
+                membership_str, is_active_member = membership if isinstance(membership, tuple) else (str(membership), False)
+            
             contact_details = str(contact_details) if not isinstance(contact_details, Exception) else "Contact details unavailable."
             relationships = str(relationships) if not isinstance(relationships, Exception) else "Relationships data unavailable."
             activities = str(activities) if not isinstance(activities, Exception) else "Activities data unavailable."
@@ -1112,7 +1116,8 @@ async def websocket_endpoint(websocket: WebSocket):
             if first_name and first_name != display_name and first_name != nick_name:
                 names_str += f"\nFirst Name: {first_name}"
             
-            detail_block = f"CURRENT CALLER INFO: Recognized Contact (ID: {caller_contact_id}).\n\n{names_str}\n\n{membership}\n\n{contact_details}\n\n{relationships}\n\n{activities}"
+            member_status_header = "ACTIVE MEMBER" if is_active_member else "INACTIVE/NON-MEMBER"
+            detail_block = f"CURRENT CALLER INFO: Recognized Contact (ID: {caller_contact_id}) - Status: {member_status_header}.\n\n{names_str}\n\n{membership_str}\n\n{contact_details}\n\n{relationships}\n\n{activities}"
             greeting = f"'You've reached the answering machine for 10BitWorks, San Antonio's largest member-supported makerspace! How can I help you today, {greet_name}?'"
 
         # Start live Slack tracking session with CNAM data only for top Card block
