@@ -26,10 +26,46 @@ async def lookup_contact_by_name(full_name: str):
         "Content-Type": "application/x-www-form-urlencoded"
     }
     
+    # Split name for fuzzy matching
+    name_parts = full_name.strip().split()
+    if len(name_parts) >= 2:
+        first = name_parts[0]
+        last = " ".join(name_parts[1:])
+        where_exact = [
+            ["OR", [
+                ["display_name", "=", full_name],
+                ["AND", [["nick_name", "=", first], ["last_name", "=", last]]],
+                ["AND", [["first_name", "=", first], ["last_name", "=", last]]]
+            ]]
+        ]
+        where_contains = [
+            ["OR", [
+                ["display_name", "CONTAINS", full_name],
+                ["AND", [["nick_name", "CONTAINS", first], ["last_name", "CONTAINS", last]]]
+            ]]
+        ]
+    else:
+        where_exact = [
+            ["OR", [
+                ["display_name", "=", full_name],
+                ["nick_name", "=", full_name],
+                ["first_name", "=", full_name],
+                ["last_name", "=", full_name]
+            ]]
+        ]
+        where_contains = [
+            ["OR", [
+                ["display_name", "CONTAINS", full_name],
+                ["nick_name", "CONTAINS", full_name],
+                ["first_name", "CONTAINS", full_name],
+                ["last_name", "CONTAINS", full_name]
+            ]]
+        ]
+        
     # First try exact match
     params = {
         "select": ["display_name", "first_name", "last_name"],
-        "where": [["display_name", "=", full_name]],
+        "where": where_exact,
         "limit": 5,
         "chain": {
             "phones": ["Phone", "get", {
@@ -57,7 +93,7 @@ async def lookup_contact_by_name(full_name: str):
             
             # If exact match yields 0, try CONTAINS
             if not data.get("values"):
-                params["where"] = [["display_name", "CONTAINS", full_name]]
+                params["where"] = where_contains
                 body["params"] = json.dumps(params)
                 response = await client.post(url, headers=headers, data=body)
                 response.raise_for_status()
