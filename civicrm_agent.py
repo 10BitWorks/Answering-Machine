@@ -240,6 +240,7 @@ async def get_recent_activities(contact_id: int):
     # We will query ActivityContact and join Activity.
     params = {
         "select": [
+            "activity_id",
             "activity_id.activity_type_id:label", 
             "activity_id.subject", 
             "activity_id.activity_date_time", 
