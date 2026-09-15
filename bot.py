@@ -33,6 +33,10 @@ from pipecat.runner.utils import parse_telephony_websocket
 from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketTransport, FastAPIWebsocketParams
 from pipecat.serializers.twilio import TwilioFrameSerializer
+import pipecat.audio.resamplers.soxr_stream_resampler
+
+# MONKEY PATCH: Fix pipecat bug where Gemini's bursty audio causes the resampler to drop chunks
+pipecat.audio.resamplers.soxr_stream_resampler.CLEAR_STREAM_AFTER_SECS = 5.0
 
 load_dotenv(override=True)
 

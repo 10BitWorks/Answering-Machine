@@ -159,3 +159,9 @@ This section documents three successive incorrect diagnoses made by an AI agent,
 *   The redesigned `JitterBufferProcessor` in `processors.py` uses an `asyncio.create_task` timer instead of a byte-count threshold. When the first audio frame of a new utterance arrives, it starts a wall-clock timer (200ms). All frames arriving during this window are held. When the timer fires, the entire buffer is flushed downstream. The transport then re-chunks the burst into 20ms packets and paces them at 1x real-time — giving it a 200ms head-start that absorbs subsequent inter-burst gaps from Gemini.
 *   **Pipeline Position**: Must be placed immediately before `transport.output()` (after `metrics_logger`).
 *   **Reset Behavior**: Resets (cancels timer, flushes partial buffer) on `TTSStoppedFrame` or `InterruptionFrame` to prevent audio carry-over between utterances.
+
+### The True Root Cause (Sept 14)
+The jitter buffer did not fix the problem because the problem was not buffer starvation. The user correctly identified that the skips were "hard splices" where text was dropped mid-word without silence. 
+This was caused by a bug in Pipecat's `soxr_stream_resampler.py`. It had a hardcoded `CLEAR_STREAM_AFTER_SECS = 0.2`. When Gemini paused generation for >200ms, the resampler cleared its internal state, instantly discarding its filter delay buffer and dropping 50-100ms of pending audio samples.
+The new JitterBuffer actually *weaponized* this bug: by flushing audio once every 1000ms, it ensured the resampler was always starved for >200ms between flushes, causing the resampler to drop a chunk of audio every single second.
+**Fix**: `CLEAR_STREAM_AFTER_SECS` in Pipecat was locally patched to `5.0`. The JitterBufferProcessor should probably be removed entirely in a future cleanup, as Gemini Live audio shouldn't need manual buffering when the resampler isn't aggressively dropping samples.
