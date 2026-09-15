@@ -287,7 +287,25 @@ async def recording_callback(request: Request):
     if call_sid in call_summaries:
         payload["Summary"] = call_summaries.pop(call_sid)
     else:
-        payload["Summary"] = "No summary available."
+        transcript = payload.get("Transcript", "")
+        if len(transcript) > 50:
+            prompt = f"Summarize this phone call transcript between an AI assistant and a caller. The summary should be a few sentences highlighting the main intent of the caller, what the bot told them, and any resulting actions.\n\nTranscript:\n{transcript}"
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(
+                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GOOGLE_API_KEY}",
+                        json={"contents": [{"parts": [{"text": prompt}]}]},
+                        timeout=15.0
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    summary_text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                    payload["Summary"] = summary_text.strip() if summary_text else "Failed to parse summary."
+            except Exception as e:
+                logger.error(f"Failed to generate post-call summary: {e}")
+                payload["Summary"] = "No summary available (generation failed)."
+        else:
+            payload["Summary"] = "Call was too short to summarize."
 
     tasks = call_turn_tasks.pop(call_sid, [])
     await finalize_live_call_slack_session(payload, tasks)
