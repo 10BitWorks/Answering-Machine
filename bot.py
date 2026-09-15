@@ -660,13 +660,17 @@ async def websocket_endpoint(websocket: WebSocket):
         speech_tracker.add_task_detail("Gracefully ended call")
         pending_hangups.add(call_sid)
 
+        # Send the tool result FIRST so Gemini receives the instruction to say goodbye
+        result = {"status": "hangup_initiated", "instruction": "You are now hanging up. Say a brief and polite goodbye to the user now before the connection is severed. BE SURE TO END BY SAYING THE TAGLINE: Come and Make It!"}
+        call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str(result))
+        await params.result_callback(result)
+        
+        # Give Gemini time to process the result and begin generating its farewell
+        await asyncio.sleep(1.0)
+
         if not is_terminating:
             is_terminating = True
             asyncio.create_task(wait_and_terminate())
-        # Return success immediately so the bot can say its final goodbye turn
-        result = {"status": "hangup_initiated", "instruction": "You are now hanging up. Say a brief and polite goodbye to the user now before the connection is severed. BE SURE TO END BY SAYING THE TAGLINE: Come and Make It!"}
-        call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str(result))
-        return result
 
     async def notify_slack(params: FunctionCallParams):
         observation = params.arguments.get("observation")
