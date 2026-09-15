@@ -52,7 +52,7 @@ from slack_agent import (
     get_slack_session_by_channel
 )
 
-from processors import SpeechTracker, CallerMuter, MetricsLogger, JitterBufferProcessor
+from processors import SpeechTracker, CallerMuter, MetricsLogger
 
 
 import civicrm_agent
@@ -1019,8 +1019,6 @@ async def websocket_endpoint(websocket: WebSocket):
     speech_tracker.context = context
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(context)
 
-    jitter_buffer = JitterBufferProcessor(buffer_ms=1000, sample_rate=8000, call_logger=call_logger)
-
     pipeline = Pipeline([
         transport.input(),
         caller_muter,
@@ -1029,7 +1027,6 @@ async def websocket_endpoint(websocket: WebSocket):
         llm,
         assistant_aggregator,
         metrics_logger,
-        jitter_buffer,
         transport.output()
     ])
 
