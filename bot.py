@@ -511,7 +511,7 @@ async def websocket_endpoint(websocket: WebSocket):
             ),
             FunctionSchema(
                 name="create_my_contact_record",
-                description="Creates a new contact record. For individuals, provide first_name and last_name. For organizations/businesses, provide organization_name instead. Use your judgment to determine whether the caller's name is a person or a business. CRITICAL: Before calling this tool, you MUST ask the caller for the proper spelling of their name IF AND ONLY IF (a) the name they gave does not align with the Caller ID, AND (b) the spelling of their name is not obvious.",
+                description="Creates a new contact record. For individuals, provide first_name and last_name. For organizations/businesses, provide organization_name instead. Use your judgment to determine whether the caller's name is a person or a business, and ask for clarity if in doubt. If they give a name that doesn't match the Caller ID, ask for clarity on spelling it before creating the contact.",
                 properties={
                     "first_name": {"type": "string", "description": "The caller's first name. (Required for individuals)"},
                     "last_name": {"type": "string", "description": "The caller's last name. (Required for individuals)"},
@@ -1079,25 +1079,41 @@ async def websocket_endpoint(websocket: WebSocket):
         
         if contact_info:
             caller_contact_id = contact_info["contact_id"]
-            name = contact_info["name"]
-            caller_recognized_name = name
-            caller_display_name = name
+            name = contact_info.get("name", "Unknown")
+            display_name = contact_info.get("display_name") or name
+            first_name = contact_info.get("first_name")
+            nick_name = contact_info.get("nick_name")
+            
+            greet_name = nick_name or first_name or display_name
+            caller_recognized_name = greet_name
+            caller_display_name = display_name
+            
             crm_url = f"https://10bitworks.org/wp-admin/admin.php?page=CiviCRM&q=civicrm%2Fcontact%2Fview&reset=1&cid={caller_contact_id}"
             speech_tracker.add_task_detail("Verified Membership status")
             
             # Fetch full profile in parallel to reduce handshake latency
-            membership, contact_details = await asyncio.gather(
+            membership, contact_details, relationships, activities = await asyncio.gather(
                 civicrm_agent.get_membership_info(caller_contact_id),
                 civicrm_agent.list_contact_info(caller_contact_id),
+                civicrm_agent.get_relationships(caller_contact_id),
+                civicrm_agent.get_recent_activities(caller_contact_id),
                 return_exceptions=True
             )
             
             # Handle potential exceptions gracefully
             membership = str(membership) if not isinstance(membership, Exception) else "Membership data unavailable."
             contact_details = str(contact_details) if not isinstance(contact_details, Exception) else "Contact details unavailable."
+            relationships = str(relationships) if not isinstance(relationships, Exception) else "Relationships data unavailable."
+            activities = str(activities) if not isinstance(activities, Exception) else "Activities data unavailable."
             
-            detail_block = f"CURRENT CALLER INFO: Recognized as {name} (ID: {caller_contact_id}).\n\n{membership}\n\n{contact_details}"
-            greeting = f"'You've reached the answering machine for 10BitWorks, San Antonio's largest member-supported makerspace! How can I help you today, {name}?'"
+            names_str = f"Display Name: {display_name}"
+            if nick_name:
+                names_str += f"\nNickname: {nick_name}"
+            if first_name and first_name != display_name and first_name != nick_name:
+                names_str += f"\nFirst Name: {first_name}"
+            
+            detail_block = f"CURRENT CALLER INFO: Recognized Contact (ID: {caller_contact_id}).\n\n{names_str}\n\n{membership}\n\n{contact_details}\n\n{relationships}\n\n{activities}"
+            greeting = f"'You've reached the answering machine for 10BitWorks, San Antonio's largest member-supported makerspace! How can I help you today, {greet_name}?'"
 
         # Start live Slack tracking session with CNAM data only for top Card block
         asyncio.create_task(start_live_call_slack_session(

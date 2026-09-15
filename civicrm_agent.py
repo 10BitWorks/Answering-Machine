@@ -217,6 +217,60 @@ async def log_call_activity(contact_id: int, subject: str, details: str):
     data = await _call_api("Activity", "create", params)
     return not data.get("is_error")
 
+async def get_relationships(contact_id: int):
+    params = {
+        "select": ["relationship_type_id:label_a_b", "relationship_type_id:label_b_a", "contact_id_a.display_name", "contact_id_b.display_name", "contact_id_a", "contact_id_b"],
+        "where": [["OR", [["contact_id_a", "=", contact_id], ["contact_id_b", "=", contact_id]]], ["is_active", "=", 1]],
+        "limit": 10
+    }
+    data = await _call_api("Relationship", "get", params)
+    if data.get("is_error") or not data.get("values"):
+        return "No active relationships."
+        
+    summary = "Relationships:\n"
+    for r in data["values"]:
+        if r.get("contact_id_a") == contact_id:
+            summary += f"- {r.get('relationship_type_id:label_a_b', 'Related to')} {r.get('contact_id_b.display_name', 'Unknown')}\n"
+        else:
+            summary += f"- {r.get('relationship_type_id:label_b_a', 'Related to')} {r.get('contact_id_a.display_name', 'Unknown')}\n"
+    return summary
+
+async def get_recent_activities(contact_id: int):
+    # Using ActivityContact join is safer for APIv4, but many endpoints support target_contact_id pseudo-field.
+    # We will query ActivityContact and join Activity.
+    params = {
+        "select": [
+            "activity_id.activity_type_id:label", 
+            "activity_id.subject", 
+            "activity_id.activity_date_time", 
+            "activity_id.details"
+        ],
+        "where": [["contact_id", "=", contact_id]],
+        "orderBy": {"activity_id.activity_date_time": "DESC"},
+        "limit": 10
+    }
+    data = await _call_api("ActivityContact", "get", params)
+    if data.get("is_error") or not data.get("values"):
+        return "No recent activities."
+        
+    summary = "Recent Activities (up to 10):\n"
+    # Deduplicate activities since a contact might have multiple ActivityContact records for the same Activity
+    seen_activities = set()
+    for ac in data["values"]:
+        act_id = ac.get("activity_id")
+        if act_id in seen_activities:
+            continue
+        seen_activities.add(act_id)
+        
+        date_str = ac.get("activity_id.activity_date_time", "Unknown Date")
+        a_type = ac.get("activity_id.activity_type_id:label", "Unknown Type")
+        subject = ac.get("activity_id.subject", "No Subject")
+        details = ac.get("activity_id.details", "")
+        summary += f"- [{date_str}] {a_type}: {subject}\n"
+        if details:
+            summary += f"  Details: {details}\n"
+    return summary
+
 async def get_contact_email(contact_id: int):
     """
     Returns the primary email address for a contact, or None if not found.

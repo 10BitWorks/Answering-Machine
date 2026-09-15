@@ -204,7 +204,7 @@ async def lookup_contact_by_phone(phone_number: str):
     match_phone = clean_phone[-10:] if len(clean_phone) >= 10 else clean_phone
     
     params = {
-        "select": ["contact_id.first_name", "contact_id.display_name", "contact_id"],
+        "select": ["contact_id.first_name", "contact_id.display_name", "contact_id.nick_name", "contact_id"],
         "where": [["phone", "LIKE", f"%{match_phone}%"]],
         "limit": 1
     }
@@ -226,10 +226,19 @@ async def lookup_contact_by_phone(phone_number: str):
                 
             val = data["values"][0]
             name = val.get("contact_id.first_name") or val.get("contact_id.display_name")
+            display_name = val.get("contact_id.display_name")
+            first_name = val.get("contact_id.first_name")
+            nick_name = val.get("contact_id.nick_name")
             contact_id = val.get("contact_id")
             
             if name and contact_id:
-                return {"name": name, "contact_id": contact_id}
+                return {
+                    "name": name, 
+                    "display_name": display_name,
+                    "first_name": first_name,
+                    "nick_name": nick_name,
+                    "contact_id": contact_id
+                }
             return None
             
     except Exception as e:
