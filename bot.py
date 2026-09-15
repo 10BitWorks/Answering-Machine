@@ -566,7 +566,7 @@ async def websocket_endpoint(websocket: WebSocket):
 #             ),
             FunctionSchema(
                 name="update_call_summary",
-                description="Update the running summary of this phone call, to be displayed in the call history. Only call this tool after each meaningful question is addressed, but never mention that you are doing it. In your summary, include who is calling, what they asked about, what answers were given, and whether their query was fully resolved. If not fully resolved, strongly suggest follow-up by including the caller's number.",
+                description="Update the running summary of this phone call, to be displayed in the call history. Only call this tool after each meaningful question is addressed, but never mention that you are doing it. In your summary, include who is calling, what they asked about, what answers were given, and whether their query was fully resolved. If not fully resolved, strongly suggest follow-up.",
                 properties={
                     "summary": {
                         "type": "string",
