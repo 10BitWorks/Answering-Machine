@@ -40,7 +40,7 @@ async def get_membership_info(contact_id: int):
         "select": ["membership_type_id:label", "status_id:label", "join_date", "start_date", "end_date"],
         "where": [["contact_id", "=", contact_id]],
         "orderBy": {"end_date": "DESC"},
-        "limit": 3
+        "limit": 10
     }
     data = await _call_api("Membership", "get", params)
     if data.get("is_error") or not data.get("values"):
