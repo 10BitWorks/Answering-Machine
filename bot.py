@@ -293,7 +293,7 @@ async def recording_callback(request: Request):
             try:
                 async with httpx.AsyncClient() as client:
                     resp = await client.post(
-                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GOOGLE_API_KEY}",
+                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key={GOOGLE_API_KEY}",
                         json={"contents": [{"parts": [{"text": prompt}]}]},
                         timeout=15.0
                     )
