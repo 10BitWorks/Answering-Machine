@@ -1021,8 +1021,8 @@ async def websocket_endpoint(websocket: WebSocket):
         
         detail_block = ""
         if caller_name:
-            detail_block = f"CURRENT CALLER INFO: Unrecognized caller identified via CNAM as {caller_name}. This may be a person's name or a business name — if in doubt, ask the caller before creating the contact. Clarify any spelling ambiguity."
-            greeting = f"'You've reached the answering machine for 10BitWorks -- San Antonio's largest member-supported makerspace! It looks like this is your first time calling, {caller_name}. May I have your first name, last name, and reason for calling?'"
+            detail_block = f"CURRENT CALLER INFO: Unrecognized caller identified via CNAM as {caller_name}. This may be a person's name or a business name — if in doubt, ask the caller before creating the contact. Clarify any spelling ambiguity, and only rely on the CNAM as a fallback for missing information."
+            greeting = f"'You've reached the answering machine for 10BitWorks -- San Antonio's largest member-supported makerspace! It looks like this is your first time calling -- may I have your first name, last name, and reason for calling?'"
         else:
             greeting = "'You've reached the answering machine for 10BitWorks -- San Antonio's largest member-supported makerspace! May I have your first name, last name, and reason for calling?'"
         
