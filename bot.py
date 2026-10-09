@@ -221,9 +221,16 @@ async def post_bot(request: Request):
             user_name=target_name
         ))
         
+        # For non-member callers, present the 10BitWorks number (the number they dialed)
+        # as caller ID so the recipient knows it's a 10BitWorks call. Members pass through
+        # their own caller ID (Twilio's default) so staff can recognize them.
+        caller_id_override = transfer_data.get("caller_id")
+        caller_id_attr = f' callerId="{caller_id_override}"' if caller_id_override else ""
+        logger.info(f"Transfer caller ID for {call_sid}: {caller_id_override or 'passthrough'}")
+        
         twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
         <Response>
-            <Dial ringTone="us" timeout="60">{target_number}</Dial>
+            <Dial ringTone="us" timeout="60"{caller_id_attr}>{target_number}</Dial>
         </Response>"""
         return Response(content=twiml_response, media_type="application/xml")
         
@@ -520,15 +527,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 required=["street_address", "city", "postal_code"]
             ),
             FunctionSchema(
-                name="add_new_phone",
-                description="Adds a new phone number to the caller's record.",
-                properties={
-                    "phone_number": {"type": "string", "description": "Phone number in E.164 format (e.g. +12105551212)."},
-                    "is_primary": {"type": "boolean", "description": "Whether this should be the primary phone number."}
-                },
-                required=["phone_number"]
-            ),
-            FunctionSchema(
                 name="add_new_email",
                 description="Adds a new email address to the caller's record.",
                 properties={
@@ -713,7 +711,9 @@ async def websocket_endpoint(websocket: WebSocket):
             return
             
         # Guard against hallucinated/placeholder phone numbers (e.g. from cancelled lookups)
-        if phone_number and "555" in phone_number.replace("-", "").replace(" ", ""):
+        # Only the exchange (digits 4-6 of the 10-digit NANP number) marks a fictional 555 number.
+        nanp_digits = ''.join(filter(str.isdigit, phone_number or ""))[-10:]
+        if len(nanp_digits) == 10 and nanp_digits[3:6] == "555":
             call_logger.warning(f"Rejected hallucinated phone number: {phone_number}")
             call_logger.info(f"Sending tool result to Gemini Live for function={args.function_name}, tool_result_message=" + str({"status": "error"}))
             await args.result_callback({"status": "error", "message": f"The phone number appears to be invalid. Please use lookup_contact again."})
@@ -735,7 +735,9 @@ async def websocket_endpoint(websocket: WebSocket):
         call_sid = call_data["call_id"]
         pending_transfers[call_sid] = {
             "number": phone_number,
-            "name": contact_name
+            "name": contact_name,
+            # Non-members: show the 10BitWorks number as caller ID. Members: pass through.
+            "caller_id": None if caller_is_member else (destination_number or None)
         }
         # A transfer overrides a hangup. Clean up any accidental hangup requests from the LLM.
         if call_sid in pending_hangups:
@@ -791,15 +793,6 @@ async def websocket_endpoint(websocket: WebSocket):
             await params.result_callback({"status": "error", "message": "Unrecognized caller."})
             return
         result = await civicrm_agent.add_address(caller_contact_id, params.arguments.get("street_address"), params.arguments.get("city"), params.arguments.get("postal_code"), params.arguments.get("is_primary", False))
-        call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "success", "message": result}))
-        await params.result_callback({"status": "success", "message": result})
-
-    async def add_phone_handler(params: FunctionCallParams):
-        if not caller_contact_id:
-            call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": "Unrecognized caller."}))
-            await params.result_callback({"status": "error", "message": "Unrecognized caller."})
-            return
-        result = await civicrm_agent.add_phone(caller_contact_id, params.arguments.get("phone_number"), params.arguments.get("is_primary", False))
         call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "success", "message": result}))
         await params.result_callback({"status": "success", "message": result})
 
@@ -953,7 +946,6 @@ async def websocket_endpoint(websocket: WebSocket):
     llm.register_function("transfer_call", transfer_call_handler, timeout_secs=10.0)
     llm.register_function("lookup_contact", lookup_contact_handler, timeout_secs=3.0)
     llm.register_function("add_new_address", add_address_handler, timeout_secs=3.0)
-    llm.register_function("add_new_phone", add_phone_handler, timeout_secs=3.0)
     llm.register_function("add_new_email", add_email_handler, timeout_secs=3.0)
     llm.register_function("set_info_as_primary", set_primary_handler, timeout_secs=3.0)
     llm.register_function("create_my_contact_record", create_contact_handler, timeout_secs=3.0)
@@ -1010,13 +1002,14 @@ async def websocket_endpoint(websocket: WebSocket):
 
     caller_contact_id = None
     caller_recognized_name = None  # CiviCRM first name, set when caller is recognized
+    caller_is_member = False  # True only for recognized ACTIVE members; controls transfer caller ID
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
         logger.info(f"Client connected: {client}")
         now = datetime.now(ZoneInfo("America/Chicago")).strftime("%A, %B %d, %Y at %I:%M %p")
         
-        nonlocal caller_contact_id, caller_recognized_name, caller_display_name, crm_url
+        nonlocal caller_contact_id, caller_recognized_name, caller_display_name, crm_url, caller_is_member
         contact_info = await civicrm_lookup.lookup_contact_by_phone(caller_number)
         
         detail_block = ""
@@ -1054,6 +1047,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 membership_str, is_active_member = "Membership data unavailable.", False
             else:
                 membership_str, is_active_member = membership if isinstance(membership, tuple) else (str(membership), False)
+            caller_is_member = bool(is_active_member)
             
             contact_details = str(contact_details) if not isinstance(contact_details, Exception) else "Contact details unavailable."
             relationships = str(relationships) if not isinstance(relationships, Exception) else "Relationships data unavailable."

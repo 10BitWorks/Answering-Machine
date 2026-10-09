@@ -165,3 +165,10 @@ The jitter buffer did not fix the problem because the problem was not buffer sta
 This was caused by a bug in Pipecat's `soxr_stream_resampler.py`. It had a hardcoded `CLEAR_STREAM_AFTER_SECS = 0.2`. When Gemini paused generation for >200ms, the resampler cleared its internal state, instantly discarding its filter delay buffer and dropping 50-100ms of pending audio samples.
 The new JitterBuffer actually *weaponized* this bug: by flushing audio once every 1000ms, it ensured the resampler was always starved for >200ms between flushes, causing the resampler to drop a chunk of audio every single second.
 **Fix**: `CLEAR_STREAM_AFTER_SECS` in Pipecat was locally patched to `5.0`. The JitterBufferProcessor should probably be removed entirely in a future cleanup, as Gemini Live audio shouldn't need manual buffering when the resampler isn't aggressively dropping samples.
+
+## 23. Phone Numbers & Transfers (Oct 2026)
+*   **No Raw-Number Dialing**: Nobody (not even staff) may have the bot dial a raw phone number. Transfers go ONLY to CiviCRM contacts via `lookup_contact` → `phone_id` → `transfer_call`. If staff want to call back someone (e.g. a missed caller), that person must exist in CiviCRM first (prior callers are auto-created). Do NOT add a "dial arbitrary number" tool.
+*   **Model Never Writes Phone Numbers**: The `add_new_phone` tool was removed because Gemini used it to attach a requested dial-out number to the *caller's own* record so it could obtain a `phone_id` for `transfer_call` (polluting CiviCRM). Never give the model a tool that accepts a phone number to store. The caller's number comes only from Caller ID (at contact creation).
+*   **Transfer Caller ID**: When the caller is NOT a recognized ACTIVE member (`caller_is_member`), the `<Dial>` in `/post_bot` sets `callerId` to the 10BitWorks number the caller dialed (`destination_number`), so recipients see a 10BitWorks call. Active members' own caller ID passes through.
+*   **555 Guard**: The fictional-number guard in `transfer_call_handler` checks only the exchange (digits 4–6 of the 10-digit number), not any "555" substring.
+
