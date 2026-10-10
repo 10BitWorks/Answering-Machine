@@ -133,7 +133,7 @@ I will modify the SYSTEM_PROMPT file myself. You may suggest, but don't touch it
     ssh ubuntu@10bit.works "sudo cat /data/coolify/applications/o5lajf9uajiwd8ntwtge2siz/logs/call_<CALL_SID>.log"
     ```
     To list recent calls: `ssh ubuntu@10bit.works "sudo ls -lt /data/coolify/applications/o5lajf9uajiwd8ntwtge2siz/logs/ | head -n 10"`
-    *Sudo is required* — the logs directory is root/Docker-owned (plain `ls`/`cat` returns "Permission denied"). Remote sudo is passwordless (`sudo -n` works). The user has pre-approved read-only sudo for log access; still show the zenity sudo notice per global rules.
+    *Sudo is required* — the logs directory is root/Docker-owned (plain `ls`/`cat` returns "Permission denied"). Remote sudo is passwordless (`sudo -n` works). The user has pre-approved read-only sudo for log access; don't show the zenity sudo notice in global rules.
 *   **Cross-Reference Phone Numbers**: For every `transfer_call` tool invocation in the logs, compare the `phone_number` argument against the bot's own `destination_number` from the `Accepted twilio call` line. If they match, the bot attempted a self-transfer.
 *   **Detect Looped Callers**: Look for multiple `Accepted twilio call` lines with the same `caller_number` in rapid succession (seconds apart). This means the caller was transferred back to the bot and forced to restart.
 *   **Listen Before Theorizing**: When asked to review a call recording, describe what you hear chronologically across the full recording *before* forming any theory. Do not invent observations — if you aren't sure what was said, say so.
