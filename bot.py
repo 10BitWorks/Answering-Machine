@@ -495,7 +495,7 @@ async def websocket_endpoint(websocket: WebSocket):
             ),
             FunctionSchema(
                 name="lookup_contact",
-                description="Look up a contact name in the CiviCRM database to get their phone_id. This does NOT transfer the call. You must use transfer_call with the resulting phone_id to actually transfer.",
+                description="Look up a contact name in the CiviCRM database to get their phone_id. This is ONLY for finding a volunteer, staff member, or officer the caller wants to be transferred to. NEVER use this tool to search for, verify, or identify the caller themselves. This does NOT transfer the call. You must use transfer_call with the resulting phone_id to actually transfer.",
                 properties={
                     "contact_name": {
                         "type": "string",
@@ -507,7 +507,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
             FunctionSchema(
                 name="create_my_contact_record",
-                description="Creates a new contact record. For individuals, provide first_name and last_name. For organizations/businesses, provide organization_name instead. Use your judgment to determine whether the caller's name is a person or a business, and ask for clarity if in doubt. If they give a name that doesn't match the Caller ID, ask for clarity on spelling it before creating the contact.",
+                description="Creates a new contact record for a new caller. DO NOT call this if the caller states they are already an existing member or already have an account with 10BitWorks (calling from an unrecognized number does not mean they need a new record; we must avoid duplicate contacts). For individuals, you MUST provide both first_name and last_name. If you only heard a single name or the name was garbled, ask the caller for their full name first. If the spoken name phonetically matches the Caller ID (CNAM) name, use the spelling from Caller ID. If the spoken name is completely different from Caller ID, ask for spelling clarification before calling this tool. For organizations/businesses, provide organization_name instead.",
                 properties={
                     "first_name": {"type": "string", "description": "The caller's first name. (Required for individuals)"},
                     "last_name": {"type": "string", "description": "The caller's last name. (Required for individuals)"},
@@ -815,10 +815,25 @@ async def websocket_endpoint(websocket: WebSocket):
         await params.result_callback({"status": "success", "message": result})
 
     async def create_contact_handler(params: FunctionCallParams):
+        nonlocal caller_contact_id
         first = (params.arguments.get("first_name") or "").strip()
         last = (params.arguments.get("last_name") or "").strip()
         org = (params.arguments.get("organization_name") or "").strip()
         
+        # Reject duplicate contact creation if caller already has a contact record established
+        if caller_contact_id:
+            call_logger.warning(f"Rejected duplicate contact creation for existing caller_contact_id={caller_contact_id}")
+            call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": "A contact record is already established for this caller. Do not create another contact."}))
+            await params.result_callback({"status": "error", "message": "A contact record is already established for this caller. Do not create another contact."})
+            return
+
+        # Ensure both first and last names are provided for individuals
+        if not org and (not first or not last):
+            call_logger.warning(f"Rejected contact creation with incomplete name: first='{first}', last='{last}'")
+            call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": "Both a first name and a last name are required for an individual caller. Please ask the caller for their full first and last name."}))
+            await params.result_callback({"status": "error", "message": "Both a first name and a last name are required for an individual caller. Please ask the caller for their full first and last name."})
+            return
+
         # Guard against sentinel/placeholder names that Gemini may hallucinate
         BLOCKED_NAMES = {"unknown", "caller", "anonymous", "unavailable", "n/a", "none"}
         if first.lower() in BLOCKED_NAMES or last.lower() in BLOCKED_NAMES:
@@ -831,7 +846,6 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.info(f"Bot creating new contact: {name_str} for number {caller_number}")
         result_data = await civicrm_agent.create_contact(first, last, caller_number, org)
         if result_data["success"]:
-            nonlocal caller_contact_id
             caller_contact_id = result_data["contact_id"]
             call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "success", "message": result_data["message"]}))
             await params.result_callback({"status": "success", "message": result_data["message"]})
@@ -1014,7 +1028,7 @@ async def websocket_endpoint(websocket: WebSocket):
         
         detail_block = ""
         if caller_name:
-            detail_block = f"CURRENT CALLER INFO: Unrecognized caller identified via CNAM as {caller_name}. This may be a person's name or a business name — if in doubt, ask the caller before creating the contact. Clarify any spelling ambiguity, and only rely on the CNAM as a fallback for missing information."
+            detail_block = f"CURRENT CALLER INFO: Unrecognized caller identified via CNAM (Caller ID) as {caller_name}. When creating a contact with create_my_contact_record, if the caller's spoken name phonetically matches the CNAM spelling (e.g. sound-alikes or homophones), prefer and use the exact spelling from CNAM. Ask for spelling clarification if the spoken name differs significantly, and do NOT create a contact if the caller indicates they are already an existing member."
             greeting = f"'You've reached the answering machine for 10BitWorks -- San Antonio's largest member-supported makerspace! It looks like this is your first time calling -- may I have your first name, last name, and reason for calling?'"
         else:
             greeting = "'You've reached the answering machine for 10BitWorks -- San Antonio's largest member-supported makerspace! May I have your first name, last name, and reason for calling?'"

@@ -67,12 +67,16 @@ I will modify the SYSTEM_PROMPT file myself. You may suggest, but don't touch it
 
 ## 7. CiviCRM Contact Management
 *   **Create Contact**: The bot proactively creates new contact records for unrecognized callers using the `create_my_contact_record` tool as soon as they provide a first and last name. This ensures all inquiries are accurately logged in CiviCRM.
+*   **No Duplicate Contact Creation**: Do NOT create a new contact if the caller states they are already an existing member or already have an account (e.g. calling from a new/unregistered phone number). `create_contact_handler` rejects calls if `caller_contact_id` is already set.
+*   **Full Name Requirement**: Individuals require both a first and last name. If only a single name or an incomplete name is spoken, the bot must prompt for the full name before calling `create_my_contact_record`.
+*   **Lookup Scope**: `lookup_contact` is exclusively for looking up volunteers/staff/officers to transfer to; never use it to search for, verify, or identify the caller themselves.
 *   **Sentinel Name Guard**: The `create_contact_handler` rejects names like "Unknown", "Caller", "Anonymous", etc. to prevent Gemini from creating bogus records when it misinterprets context text as a caller's name.
 *   **Safe Updates**: Data management tools (address, phone, email) are "add-only" or "primary-toggle" to prevent accidental deletion or overwriting of existing records. The bot cannot delete records.
 *   **Membership Intelligence**: Membership info now includes `join_date` and `start_date` alongside `end_date`, providing the bot with full context on the user's history with the makerspace.
 
 ## 8. Caller Identification & Greeting
 *   **CNAM Handling**: Twilio CNAM arrives in ALL CAPS (e.g. "DAVID BLUM"). The code title-cases it and extracts the first name for the greeting ("Am I speaking with David?"), while passing the full name in the context `detail_block` for the bot's reference.
+*   **CNAM Phonetic Spelling**: When an unrecognized caller states their name and it phonetically matches the CNAM (Caller ID) name (e.g. "Tarrus" vs "Taurus", homophones or sound-alikes), prefer and use the spelling provided by CNAM.
 *   **Unknown Callers**: When neither CiviCRM nor CNAM identifies the caller, the `detail_block` is left empty — do NOT inject "Unknown Caller" or similar sentinel text that Gemini might interpret as a name.
 *   **Transcript Labels**: Use `caller_recognized_name` (CiviCRM first name) over `caller_name` (CNAM) over "Caller" for transcript speaker labels.
 *   **Transfer Phone Guard**: The `transfer_call_handler` rejects phone numbers containing "555" to prevent Gemini from dialing hallucinated placeholder numbers when a `lookup_contact` call gets cancelled by user interruption.
