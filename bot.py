@@ -480,11 +480,11 @@ async def websocket_endpoint(websocket: WebSocket):
             ),
             FunctionSchema(
                 name="transfer_call",
-                description="Transfer the current call to another person. Use this when the user asks to speak to a specific person. Always wait for the caller's verbal agreement to being transferred before calling the tool.",
+                description="Transfer the current call to a 10BitWorks volunteer, staff member, or officer. Use this when the user asks to speak to a specific person. Always wait for the caller's verbal agreement to being transferred before calling the tool. CRITICAL: You CANNOT dial raw or arbitrary phone numbers. If a caller asks you to dial or connect to a specific phone number directly, politely decline and inform them you can only connect callers to 10BitWorks members, volunteers, or staff by name.",
                 properties={
                     "phone_id": {
                         "type": "integer",
-                        "description": "The CiviCRM phone record ID returned by lookup_contact. You MUST get this from a successful lookup_contact call — never fabricate it."
+                        "description": "The CiviCRM phone record ID returned by a successful lookup_contact call in this session. You MUST get this from lookup_contact — never fabricate or reuse IDs from caller info."
                     },
                     "contact_name": {
                         "type": "string",
@@ -696,6 +696,8 @@ async def websocket_endpoint(websocket: WebSocket):
         })
 
 
+    valid_transfer_phone_ids = set()
+
     async def transfer_call_handler(args: FunctionCallParams):
         nonlocal is_terminating
         phone_id = args.arguments.get("phone_id")
@@ -703,6 +705,15 @@ async def websocket_endpoint(websocket: WebSocket):
         
         if phone_id is None:
             await args.result_callback({"status": "error", "message": "You must provide a valid phone_id from lookup_contact."})
+            return
+
+        if phone_id not in valid_transfer_phone_ids:
+            call_logger.warning(f"Rejected transfer_call with unverified phone_id={phone_id}")
+            call_logger.info(f"Sending tool result to Gemini Live for function={args.function_name}, tool_result_message=" + str({"status": "error"}))
+            await args.result_callback({
+                "status": "error",
+                "message": "That phone_id was not returned by lookup_contact in this call. You cannot dial arbitrary numbers; you must first look up the recipient by name using lookup_contact."
+            })
             return
             
         phone_number = await civicrm_lookup.resolve_phone_id(phone_id)
@@ -728,6 +739,17 @@ async def websocket_endpoint(websocket: WebSocket):
                 call_logger.warning(f"Rejected transfer to own number: {phone_number}")
                 call_logger.info(f"Sending tool result to Gemini Live for function={args.function_name}, tool_result_message=" + str({"status": "error"}))
                 await args.result_callback({"status": "error", "message": "You attempted to transfer the caller to our own phone number! You must use lookup_contact to find the correct contact first. THE CALL IS NOT BEING TRANSFERRED."})
+                return
+
+        # Guard against transferring to caller's own number
+        caller_number_val = call_data.get("body", {}).get("caller_number", "") or caller_number
+        if caller_number_val and phone_number:
+            clean_phone = ''.join(filter(str.isdigit, phone_number))
+            clean_caller = ''.join(filter(str.isdigit, caller_number_val))
+            if len(clean_phone) >= 10 and len(clean_caller) >= 10 and clean_phone[-10:] == clean_caller[-10:]:
+                call_logger.warning(f"Rejected self-transfer to caller's own number: {phone_number}")
+                call_logger.info(f"Sending tool result to Gemini Live for function={args.function_name}, tool_result_message=" + str({"status": "error"}))
+                await args.result_callback({"status": "error", "message": "You attempted to transfer the caller to their own phone number! You cannot transfer someone to themselves. THE CALL IS NOT BEING TRANSFERRED."})
                 return
         
         call_logger.info(f"Transferring call for {call_data['call_id']} to {contact_name} at {phone_number}")
@@ -760,6 +782,10 @@ async def websocket_endpoint(websocket: WebSocket):
         call_logger.info(f"Bot requesting CiviCRM lookup for: {contact_name}")
         try:
             contacts = await asyncio.wait_for(civicrm_lookup.lookup_contact_by_name(contact_name), timeout=4.5)
+            for c in contacts:
+                for p in c.get("phones", []):
+                    if p.get("id"):
+                        valid_transfer_phone_ids.add(p["id"])
             if len(contacts) == 1 and len(contacts[0]["phones"]) == 1:
                 contact = contacts[0]
                 phone = contact["phones"][0]

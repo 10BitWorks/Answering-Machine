@@ -94,19 +94,19 @@ async def list_contact_info(contact_id: int):
     if not results["addresses"]: summary += "- None\n"
     for a in results["addresses"]:
         primary = " (PRIMARY)" if a.get("is_primary") else ""
-        summary += f"- ID {a['id']}: {a['street_address']}, {a['city']} {a['postal_code']} [{a['location_type_id:label']}]{primary}\n"
+        summary += f"- {a['street_address']}, {a['city']} {a['postal_code']} [{a['location_type_id:label']}]{primary}\n"
         
     summary += "\nPhone Numbers:\n"
     if not results["phones"]: summary += "- None\n"
     for p in results["phones"]:
         primary = " (PRIMARY)" if p.get("is_primary") else ""
-        summary += f"- ID {p['id']}: {p['phone']} [{p['location_type_id:label']}]{primary}\n"
+        summary += f"- {p['phone']} [{p['location_type_id:label']}]{primary}\n"
         
     summary += "\nEmails:\n"
     if not results["emails"]: summary += "- None\n"
     for e in results["emails"]:
         primary = " (PRIMARY)" if e.get("is_primary") else ""
-        summary += f"- ID {e['id']}: {e['email']} [{e['location_type_id:label']}]{primary}\n"
+        summary += f"- {e['email']} [{e['location_type_id:label']}]{primary}\n"
         
     return summary
 
