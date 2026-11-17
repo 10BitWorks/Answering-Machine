@@ -277,6 +277,43 @@ async def get_recent_activities(contact_id: int):
             summary += f"  Details: {details}\n"
     return summary
 
+async def get_upcoming_events(days_ahead: int = 60, limit: int = 8):
+    """
+    Returns a caller-friendly list of upcoming events/classes, plus a success flag.
+    """
+    params = {
+        "select": ["title", "summary", "event_type_id:label", "start_date", "end_date"],
+        "where": [
+            ["start_date", ">=", "now"],
+            ["start_date", "<=", f"+{days_ahead} days"],
+        ],
+        "orderBy": {"start_date": "ASC"},
+        "limit": limit
+    }
+    data = await _call_api("Event", "get", params)
+    if data.get("is_error"):
+        logger.error(f"CiviCRM Event.get failed: {data.get('error_message')}")
+        return "The events calendar is not available right now.", False
+    if not data.get("values"):
+        return "There are no upcoming events or classes on the calendar right now.", True
+
+    lines = []
+    for e in data["values"]:
+        title = e.get("title", "Untitled event")
+        etype = e.get("event_type_id:label") or "Event"
+        start = e.get("start_date", "")
+        end = e.get("end_date", "")
+        summary = (e.get("summary") or "").replace("\r", " ").replace("\n", " ").strip()
+        if len(summary) > 150:
+            summary = summary[:150].rstrip() + "..."
+        line = f"- [{etype}] {title} | starts {start}"
+        if end:
+            line += f" | ends {end}"
+        if summary:
+            line += f" | {summary}"
+        lines.append(line)
+    return "\n".join(lines), True
+
 async def get_contact_email(contact_id: int):
     """
     Returns the primary email address for a contact, or None if not found.

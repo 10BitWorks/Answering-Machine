@@ -57,7 +57,6 @@ from processors import SpeechTracker, CallerMuter, MetricsLogger
 
 
 import civicrm_agent
-import zammad_cti
 import zammad_agent
 
 app = FastAPI()
@@ -87,8 +86,6 @@ required_env_vars = [
     "CIVICRM_API_KEY",
     "CIVICRM_SITE_KEY",
     "CIVICRM_SYSTEM_CONTACT_ID",
-    "ZAMMAD_API_TOKEN",
-    "ZAMMAD_CTI_ENDPOINT",
     "GOCLAW_API_URL",
     "GOCLAW_API_KEY"
 ]
@@ -202,25 +199,11 @@ async def post_bot(request: Request):
         target_number = transfer_data.get("number")
         target_name = transfer_data.get("name")
         
-        # Get caller info to send the 'answer' event to Zammad
-        call_info = active_calls.get(call_sid, {})
-        from_num = call_info.get("from", "Unknown")
-        
         logger.info(f"Executing transfer for {call_sid} to {target_name} ({target_number})")
         
         # Clean up any lingering hangup request just in case
         if call_sid in pending_hangups:
             pending_hangups.remove(call_sid)
-            
-        # Push 'answer' to Zammad with the new target person's name
-        asyncio.create_task(zammad_cti.push_cti_event(
-            event="answer",
-            from_number=from_num,
-            to_number=target_number,
-            direction="in",
-            call_id=call_sid,
-            user_name=target_name
-        ))
         
         # For non-member callers, present the 10BitWorks number (the number they dialed)
         # as caller ID so the recipient knows it's a 10BitWorks call. Members pass through
@@ -552,17 +535,28 @@ async def websocket_endpoint(websocket: WebSocket):
                 },
                 required=["entity_type", "record_id"]
             ),
-#             FunctionSchema(
-#                 name="ask_support_bot",
-#                 description="Consult the 10BitWorks support bot for questions you cannot answer from your own knowledge. This AI support agent can search Slack archives for specific answers, but takes some time. Call this tool only when you don't know the answer. The tool will automatically return a 'processing' instruction telling you to stall naturally while it fetches the answer in the background.",
-#                 properties={
-#                     "question": {
-#                         "type": "string",
-#                         "description": "The message to send to the support bot. The first time you call this tool, mention who you are handling a call from and what was discussed so far. Ask for an unformatted text response within 20 seconds."
-#                     }
-#                 },
-#                 required=["question"]
-#             ),
+            FunctionSchema(
+                name="ask_support_bot",
+                description="Consult the 10BitWorks support bot for questions you cannot answer from your own knowledge. This AI support agent can search Slack archives for specific answers, but takes some time. Call this tool only when you don't know the answer. The tool will automatically return a 'processing' instruction telling you to stall naturally while it fetches the answer in the background.",
+                properties={
+                    "question": {
+                        "type": "string",
+                        "description": "The message to send to the support bot. The first time you call this tool, mention who you are handling a call from and what was discussed so far. Ask for an unformatted text response within 20 seconds."
+                    }
+                },
+                required=["question"]
+            ),
+            FunctionSchema(
+                name="lookup_upcoming_events",
+                description="Look up upcoming events and classes on the 10BitWorks calendar (CiviCRM). Use this whenever the caller asks about upcoming classes, workshops, events, open houses, or what's on the schedule. Returns a list sorted by start date.",
+                properties={
+                    "days_ahead": {
+                        "type": "integer",
+                        "description": "How many days ahead to search. Default 60. Use a larger value (e.g. 180) if the caller asks about a specific future season or 'later this year'."
+                    }
+                },
+                required=[]
+            ),
             FunctionSchema(
                 name="update_call_summary",
                 description="Update the running summary of this phone call, to be displayed in the call history. Only call this tool after each meaningful question is addressed, but never mention that you are doing it. In your summary, include who is calling, what they asked about, what answers were given, and whether their query was fully resolved. If not fully resolved, strongly suggest follow-up.",
@@ -884,7 +878,7 @@ async def websocket_endpoint(websocket: WebSocket):
         question = params.arguments.get("question", "")
         goclaw_url = os.getenv("GOCLAW_API_URL")
         goclaw_key = os.getenv("GOCLAW_API_KEY")
-        goclaw_agent = os.getenv("GOCLAW_AGENT", "10BitWorks-Answering-Machine")
+        goclaw_agent = os.getenv("GOCLAW_AGENT", "10bot")
         
         if not goclaw_url or not goclaw_key:
             call_logger.error("GOCLAW_API_URL or GOCLAW_API_KEY not configured")
@@ -906,7 +900,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Give the bot time to speak its stall instruction before we potentially trigger speech again
                 await asyncio.sleep(0.5)
                 
-                async with httpx.AsyncClient(timeout=25.0) as client:
+                async with httpx.AsyncClient(timeout=120.0) as client:
                     response = await client.post(
                         f"{goclaw_url.rstrip('/')}/v1/chat/completions",
                         headers={
@@ -965,11 +959,11 @@ async def websocket_endpoint(websocket: WebSocket):
         # Return immediately to Pipecat framework so the bot can stall naturally
         call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({
             "status": "processing",
-            "instruction": "The support bot is looking this up now. If you have no answer to provide on your own, indicate the caller should wait by saying a phrase like 'Let me check on that for you' OR 'One moment.' OR 'Let me see... looking into that for you now.' OR 'just a sec.' The answer will arrive within 30 seconds and be provided to you automatically."
+            "instruction": "The support bot is looking this up now. If you have no answer to provide on your own, indicate the caller should wait by saying a phrase like 'Let me check on that for you' OR 'One moment.' OR 'Let me see... looking into that for you now.' OR 'just a sec.' The answer will arrive within about two minutes and be provided to you automatically."
         }))
         await params.result_callback({
             "status": "processing",
-            "instruction": "The support bot is looking this up now. If you have no answer to provide on your own, indicate the caller should wait by saying a phrase like 'Let me check on that for you' OR 'One moment.' OR 'Let me see... looking into that for you now.' OR 'just a sec.' The answer will arrive within 30 seconds and be provided to you automatically."
+            "instruction": "The support bot is looking this up now. If you have no answer to provide on your own, indicate the caller should wait by saying a phrase like 'Let me check on that for you' OR 'One moment.' OR 'Let me see... looking into that for you now.' OR 'just a sec.' The answer will arrive within about two minutes and be provided to you automatically."
         })
 
         # Wait here to prevent the Pipecat tool handler task from finishing immediately.
@@ -982,6 +976,19 @@ async def websocket_endpoint(websocket: WebSocket):
             call_logger.debug("ask_support_bot_handler cancelled by interruption, background task survives.")
             pass
 
+    async def lookup_events_handler(params: FunctionCallParams):
+        days_ahead = params.arguments.get("days_ahead") or 60
+        try:
+            days_ahead = max(1, min(int(days_ahead), 365))
+        except (TypeError, ValueError):
+            days_ahead = 60
+        call_logger.info(f"Looking up upcoming events (next {days_ahead} days)")
+        result_text, ok = await civicrm_agent.get_upcoming_events(days_ahead=days_ahead)
+        payload = ({"status": "success", "events": result_text} if ok
+                   else {"status": "error", "message": result_text})
+        call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str(payload))
+        await params.result_callback(payload)
+
     llm.register_function("end_call", hang_up, timeout_secs=10.0)
     llm.register_function("report_missing_knowledge", notify_slack, timeout_secs=2.0)
     llm.register_function("transfer_call", transfer_call_handler, timeout_secs=10.0)
@@ -990,7 +997,8 @@ async def websocket_endpoint(websocket: WebSocket):
     llm.register_function("add_new_email", add_email_handler, timeout_secs=3.0)
     llm.register_function("set_info_as_primary", set_primary_handler, timeout_secs=3.0)
     llm.register_function("create_my_contact_record", create_contact_handler, timeout_secs=3.0)
-    #llm.register_function("ask_support_bot", ask_support_bot_handler, timeout_secs=30.0)
+    llm.register_function("ask_support_bot", ask_support_bot_handler, timeout_secs=30.0)
+    llm.register_function("lookup_upcoming_events", lookup_events_handler, timeout_secs=10.0)
 
     async def update_call_summary_handler(params: FunctionCallParams):
         summary = params.arguments.get("summary", "")
@@ -1117,24 +1125,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 
-
-        # Determine the recipient label for Zammad CTI
-        recipient_label = "Makerspace"
-        if "2105470221" in destination_number:
-            recipient_label = "Virtual Receptionist"
-        elif "8559042954" in destination_number:
-            recipient_label = "Test Line"
-
-        # Trigger Zammad CTI answer event
-        asyncio.create_task(zammad_cti.push_cti_event(
-            "answer", 
-            caller_number, 
-            destination_number, 
-            "in", 
-            call_data["call_id"], 
-            user_name=recipient_label,
-            answering_number="10Bot"
-        ))
 
         context.add_message(
             {"role": "developer", "content": f"SYSTEM INFO: Your name is {selected_voice}. The current date and time is {now}. The caller's phone number is {caller_number}.\n\n{detail_block}\n\nSimply say: {greeting}"}
