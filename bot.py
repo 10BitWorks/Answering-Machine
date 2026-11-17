@@ -33,10 +33,11 @@ from pipecat.runner.utils import parse_telephony_websocket
 from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketTransport, FastAPIWebsocketParams
 from pipecat.serializers.twilio import TwilioFrameSerializer
-import pipecat.audio.resamplers.soxr_stream_resampler
-
-# MONKEY PATCH: Fix pipecat bug where Gemini's bursty audio causes the resampler to drop chunks
-pipecat.audio.resamplers.soxr_stream_resampler.CLEAR_STREAM_AFTER_SECS = 5.0
+# NOTE: A monkeypatch here used to raise Pipecat's soxr resampler
+# CLEAR_STREAM_AFTER_SECS to 5.0 to stop mid-word audio drops. Since
+# pipecat-ai 1.16.0 the transport output uses SincStreamAudioResampler,
+# which never clears its filter by default, so the patch is no longer
+# needed (and the constant no longer exists).
 
 load_dotenv(override=True)
 
@@ -76,7 +77,7 @@ async def health():
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 # Note: Using the model name without the "models/" prefix or v1alpha features
 # was required to resolve the 1011 internal error.
-MODEL_NAME = "gemini-3.1-flash-live-preview"
+MODEL_NAME = "gemini-3.8-live"
 
 required_env_vars = [
     "GOOGLE_API_KEY",
