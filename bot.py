@@ -537,7 +537,7 @@ async def websocket_endpoint(websocket: WebSocket):
             ),
             FunctionSchema(
                 name="ask_support_bot",
-                description="Consult the 10BitWorks support bot for questions you cannot answer from your own knowledge. This AI support agent can search Slack archives for specific answers, but takes some time. Call this tool only when you don't know the answer. The tool will automatically return a 'processing' instruction telling you to stall naturally while it fetches the answer in the background.",
+                description="Delegate a question to the 10BitWorks support bot, which CAN search Slack archives and community discussions on your behalf - you cannot search Slack directly, but you can always delegate to this tool. Use it whenever: the caller asks what people have said, posted, or discussed on Slack; the caller asks for details missing from your knowledge (instructor names, schedule specifics, recent decisions); or you are about to say 'I don't know' or tell the caller to check Slack themselves. Never tell the caller you cannot look something up - delegate here instead. This tool returns a 'processing' instruction telling you to stall naturally while the answer is fetched in the background.",
                 properties={
                     "question": {
                         "type": "string",
@@ -548,7 +548,7 @@ async def websocket_endpoint(websocket: WebSocket):
             ),
             FunctionSchema(
                 name="lookup_upcoming_events",
-                description="Look up upcoming events and classes on the 10BitWorks calendar (CiviCRM). Use this whenever the caller asks about upcoming classes, workshops, events, open houses, or what's on the schedule. Returns a list sorted by start date.",
+                description="Look up upcoming events and classes on the 10BitWorks calendar (CiviCRM). Use this whenever the caller asks about upcoming classes, workshops, events, open houses, or what's on the schedule. Returns a list sorted by start date. For details not in the list (instructors, discussions, changes), use ask_support_bot.",
                 properties={
                     "days_ahead": {
                         "type": "integer",
