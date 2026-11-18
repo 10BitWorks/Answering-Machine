@@ -1086,7 +1086,11 @@ async def websocket_endpoint(websocket: WebSocket):
     task = PipelineTask(
         pipeline, 
         params=PipelineParams(audio_in_sample_rate=8000, audio_out_sample_rate=8000, enable_metrics=True, enable_usage_metrics=True),
-        idle_timeout_secs=120.0
+        # 300s: the ask_support_bot wait (stall phrase, goclaw agent loop, one
+        # retry) can run well past two minutes of no frames. The old 120s idle
+        # timeout killed the pipeline mid-lookup, which Twilio plays as
+        # "Application error". end_call/webhook teardown still cancels instantly.
+        idle_timeout_secs=300.0
     )
 
     if call_sid in active_calls:
