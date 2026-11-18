@@ -899,64 +899,78 @@ async def websocket_endpoint(websocket: WebSocket):
 
             Streaming matters: an nginx proxy in front of goclaw kills non-streaming
             requests with a 504 after 60s of silence, but every streamed chunk resets
-            that timer, so long multi-iteration agent runs survive.
+            that timer, so long multi-iteration agent runs survive. The agent loop
+            upstream occasionally aborts mid-stream (transient provider errors), so
+            a failed or empty attempt is retried once before giving up.
             """
+            MAX_ATTEMPTS = 2
             answer = ""
-            try:
-                # Give the bot time to speak its stall instruction before we potentially trigger speech again
-                await asyncio.sleep(0.5)
+            last_error = None
+            for attempt in range(1, MAX_ATTEMPTS + 1):
+                answer = ""
+                try:
+                    # Give the bot time to speak its stall instruction before we potentially trigger speech again
+                    if attempt == 1:
+                        await asyncio.sleep(0.5)
 
-                headers = {
-                    "Authorization": f"Bearer {goclaw_key}",
-                    "X-GoClaw-User-Id": goclaw_user_id,
-                    "X-GoClaw-Agent": goclaw_agent,
-                    "X-GoClaw-Session-Id": call_sid,
-                    "Content-Type": "application/json",
-                    "Accept": "text/event-stream",
-                }
-                payload = {
-                    "stream": True,
-                    "messages": [{"role": "user", "content": question}],
-                }
-                timeout = httpx.Timeout(15.0, read=180.0, write=15.0, pool=15.0)
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    async with client.stream(
-                        "POST",
-                        f"{goclaw_url.rstrip('/')}/v1/chat/completions",
-                        headers=headers,
-                        json=payload,
-                    ) as response:
-                        response.raise_for_status()
-                        async for line in response.aiter_lines():
-                            if not line.startswith("data:"):
-                                continue
-                            data_str = line[5:].strip()
-                            if data_str == "[DONE]":
-                                break
-                            try:
-                                chunk = json.loads(data_str)
-                                delta = chunk.get("choices", [{}])[0].get("delta", {})
-                                piece = delta.get("content") or ""
-                                if piece:
-                                    answer += piece
-                            except (json.JSONDecodeError, IndexError, AttributeError, KeyError):
-                                continue
-                if answer.strip():
-                    call_logger.info(f"Goclaw responded via stream ({len(answer)} chars)")
-                else:
-                    call_logger.warning("Goclaw stream returned empty response")
-                    answer = "ERROR: The support bot returned an empty response. It may not be able to help with this query. Proceed to answer on your own."
-            except httpx.TimeoutException:
-                call_logger.error("Goclaw stream timed out")
-                if not answer.strip():
+                    headers = {
+                        "Authorization": f"Bearer {goclaw_key}",
+                        "X-GoClaw-User-Id": goclaw_user_id,
+                        "X-GoClaw-Agent": goclaw_agent,
+                        "X-GoClaw-Session-Id": call_sid,
+                        "Content-Type": "application/json",
+                        "Accept": "text/event-stream",
+                    }
+                    payload = {
+                        "stream": True,
+                        "messages": [{"role": "user", "content": question}],
+                    }
+                    timeout = httpx.Timeout(15.0, read=180.0, write=15.0, pool=15.0)
+                    async with httpx.AsyncClient(timeout=timeout) as client:
+                        async with client.stream(
+                            "POST",
+                            f"{goclaw_url.rstrip('/')}/v1/chat/completions",
+                            headers=headers,
+                            json=payload,
+                        ) as response:
+                            response.raise_for_status()
+                            async for line in response.aiter_lines():
+                                if not line.startswith("data:"):
+                                    continue
+                                data_str = line[5:].strip()
+                                if data_str == "[DONE]":
+                                    break
+                                try:
+                                    chunk = json.loads(data_str)
+                                    delta = chunk.get("choices", [{}])[0].get("delta", {})
+                                    piece = delta.get("content") or ""
+                                    if piece:
+                                        answer += piece
+                                except (json.JSONDecodeError, IndexError, AttributeError, KeyError):
+                                    continue
+                    if answer.strip():
+                        call_logger.info(f"Goclaw responded via stream on attempt {attempt} ({len(answer)} chars)")
+                        break
+                    call_logger.warning(f"Goclaw stream attempt {attempt} returned empty response")
+                    last_error = "empty response"
+                except httpx.TimeoutException:
+                    call_logger.error(f"Goclaw stream attempt {attempt} timed out")
+                    last_error = "timeout"
+                except Exception as e:
+                    call_logger.error(f"Goclaw request failed on attempt {attempt}: {e}")
+                    last_error = str(e)
+
+                if attempt < MAX_ATTEMPTS and not is_terminating:
+                    await asyncio.sleep(3.0)
+
+            if not answer.strip():
+                if last_error == "timeout":
                     answer = "TIMEOUT: The support bot is taking too long to respond. Proceed to answer on your own."
-            except Exception as e:
-                call_logger.error(f"Goclaw request failed: {e}")
-                if not answer.strip():
+                else:
                     answer = "ERROR: The support bot is currently unavailable. Proceed to answer on your own."
-            finally:
-                # Signal the tool handler task that it can safely finish
-                finished_event.set()
+
+            # Signal the tool handler task that it can safely finish
+            finished_event.set()
             
             # Don't inject if the call is ending
             if is_terminating:
