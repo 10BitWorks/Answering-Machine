@@ -984,12 +984,18 @@ async def websocket_endpoint(websocket: WebSocket):
                 "role": "developer",
                 "content": f"SUPPORT BOT RESPONSE: The support bot answered the question '{question}' as follows:\n\n{answer}\n\nRelay this information to the caller naturally, in your own voice. Do not mention the support bot or that you looked anything up."
             }
-            
-            # Inject into local context for bookkeeping
-            context.add_message(msg)
-            
-            # Push directly to GeminiLiveLLMService to bypass aggregators and send to WebSocket
-            await llm.process_frame(LLMMessagesAppendFrame([msg]), FrameDirection.DOWNSTREAM)
+
+            # Push the append frame with run_llm=True so it flows through the
+            # assistant aggregator (llm's downstream neighbor), which lands the
+            # message in context AND pushes the context frame back upstream that
+            # completes the turn. On Pipecat 1.16 a bare append only queues the
+            # content with turn_complete=False - without the aggregator round
+            # trip the model reads the answer and never speaks, and the call
+            # dies on the idle timeout.
+            await llm.process_frame(
+                LLMMessagesAppendFrame([msg], run_llm=True),
+                FrameDirection.DOWNSTREAM,
+            )
         
         # Fire off the background task (survives caller interruptions)
         asyncio.create_task(_fetch_and_inject())
