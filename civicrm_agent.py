@@ -277,14 +277,17 @@ async def get_recent_activities(contact_id: int):
             summary += f"  Details: {details}\n"
     return summary
 
-async def get_upcoming_events(days_ahead: int = 60, limit: int = 8):
+async def get_upcoming_events(days_ahead: int = 60, days_back: int = 0, limit: int = 12):
     """
-    Returns a caller-friendly list of upcoming events/classes, plus a success flag.
+    Returns a caller-friendly list of events in a window around today -
+    upcoming by default, or including the recent past via days_back - plus a
+    success flag.
     """
+    start_floor = "now" if days_back <= 0 else f"-{days_back} days"
     params = {
         "select": ["title", "summary", "event_type_id:label", "start_date", "end_date"],
         "where": [
-            ["start_date", ">=", "now"],
+            ["start_date", ">=", start_floor],
             ["start_date", "<=", f"+{days_ahead} days"],
         ],
         "orderBy": {"start_date": "ASC"},

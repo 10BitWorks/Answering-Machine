@@ -86,8 +86,8 @@ required_env_vars = [
     "CIVICRM_API_KEY",
     "CIVICRM_SITE_KEY",
     "CIVICRM_SYSTEM_CONTACT_ID",
-    "GOCLAW_API_URL",
-    "GOCLAW_API_KEY"
+    "HERMES_API_URL",
+    "HERMES_API_KEY"
 ]
 
 missing_vars = [var for var in required_env_vars if not os.getenv(var)]
@@ -548,11 +548,15 @@ async def websocket_endpoint(websocket: WebSocket):
             ),
             FunctionSchema(
                 name="lookup_upcoming_events",
-                description="Look up upcoming events and classes on the 10BitWorks calendar (CiviCRM). Use this whenever the caller asks about upcoming classes, workshops, events, open houses, or what's on the schedule. Returns a list sorted by start date. For details not in the list (instructors, discussions, changes), use ask_support_bot.",
+                description="Look up events and classes on the 10BitWorks calendar (CiviCRM). Use this whenever the caller asks about upcoming classes, workshops, events, open houses, what's on the schedule, OR about events that recently happened (past openings, ceremonies, classes). Returns a list sorted by start date. For details not in the list (instructors, discussions, changes), use ask_support_bot.",
                 properties={
                     "days_ahead": {
                         "type": "integer",
                         "description": "How many days ahead to search. Default 60. Use a larger value (e.g. 180) if the caller asks about a specific future season or 'later this year'."
+                    },
+                    "days_back": {
+                        "type": "integer",
+                        "description": "How many days BACK to include. Default 0 (upcoming only). Use 14-30 whenever the caller asks about recent or past events ('last week', 'the grand opening', 'did anything happen on Friday')."
                     }
                 },
                 required=[]
@@ -876,32 +880,30 @@ async def websocket_endpoint(websocket: WebSocket):
 
     async def ask_support_bot_handler(params: FunctionCallParams):
         question = params.arguments.get("question", "")
-        goclaw_url = os.getenv("GOCLAW_API_URL")
-        goclaw_key = os.getenv("GOCLAW_API_KEY")
-        goclaw_agent = os.getenv("GOCLAW_AGENT", "10bot")
-        
-        if not goclaw_url or not goclaw_key:
-            call_logger.error("GOCLAW_API_URL or GOCLAW_API_KEY not configured")
+        hermes_url = os.getenv("HERMES_API_URL", "http://10.0.24.1:8642/v1")
+        hermes_key = os.getenv("HERMES_API_KEY")
+        hermes_model = os.getenv("HERMES_MODEL", "hermes-agent")
+
+        if not hermes_url or not hermes_key:
+            call_logger.error("HERMES_API_URL or HERMES_API_KEY not configured")
             call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": "Support bot is not available right now."}))
             await params.result_callback({"status": "error", "message": "Support bot is not available right now."})
             return
-        
-        call_logger.info(f"Consulting Goclaw support bot: {question[:80]}...")
-        
-        # Use caller's phone number as the Goclaw user ID for session continuity
-        goclaw_user_id = caller_number if caller_number != "Unknown Caller" else f"call-{call_sid}"
-        
+
+        call_logger.info(f"Consulting Hermes support bot: {question[:80]}...")
+
         # Event to keep the Pipecat tool task alive
         finished_event = asyncio.Event()
-        
-        async def _fetch_and_inject():
-            """Background task: query Goclaw via SSE stream and inject result into conversation context.
 
-            Streaming matters: an nginx proxy in front of goclaw kills non-streaming
-            requests with a 504 after 60s of silence, but every streamed chunk resets
-            that timer, so long multi-iteration agent runs survive. The agent loop
-            upstream occasionally aborts mid-stream (transient provider errors), so
-            a failed or empty attempt is retried once before giving up.
+        async def _fetch_and_inject():
+            """Background task: query the Hermes agent and inject the result into context.
+
+            Hermes (same host as this bot, reached directly via its docker-bridge
+            IP) runs its own agent loop with Slack access, so a lookup can take
+            1-2 minutes. The wait must never kill the call: per-attempt read
+            timeouts are capped so that even a retry always injects a fallback
+            answer before the pipeline's idle timeout fires, and every failure
+            becomes an instruction to answer on our own rather than a crash.
             """
             MAX_ATTEMPTS = 2
             answer = ""
@@ -914,50 +916,37 @@ async def websocket_endpoint(websocket: WebSocket):
                         await asyncio.sleep(0.5)
 
                     headers = {
-                        "Authorization": f"Bearer {goclaw_key}",
-                        "X-GoClaw-User-Id": goclaw_user_id,
-                        "X-GoClaw-Agent": goclaw_agent,
-                        "X-GoClaw-Session-Id": call_sid,
+                        "Authorization": f"Bearer {hermes_key}",
                         "Content-Type": "application/json",
-                        "Accept": "text/event-stream",
                     }
                     payload = {
-                        "stream": True,
+                        "model": hermes_model,
                         "messages": [{"role": "user", "content": question}],
                     }
-                    timeout = httpx.Timeout(15.0, read=180.0, write=15.0, pool=15.0)
+                    # read=130s per attempt: 2 attempts + retry sleep fit inside
+                    # the pipeline's 300s idle timeout, so a fallback answer is
+                    # always injected before the call can be torn down.
+                    timeout = httpx.Timeout(15.0, read=130.0, write=15.0, pool=15.0)
                     async with httpx.AsyncClient(timeout=timeout) as client:
-                        async with client.stream(
-                            "POST",
-                            f"{goclaw_url.rstrip('/')}/v1/chat/completions",
+                        response = await client.post(
+                            f"{hermes_url.rstrip('/')}/v1/chat/completions",
                             headers=headers,
                             json=payload,
-                        ) as response:
-                            response.raise_for_status()
-                            async for line in response.aiter_lines():
-                                if not line.startswith("data:"):
-                                    continue
-                                data_str = line[5:].strip()
-                                if data_str == "[DONE]":
-                                    break
-                                try:
-                                    chunk = json.loads(data_str)
-                                    delta = chunk.get("choices", [{}])[0].get("delta", {})
-                                    piece = delta.get("content") or ""
-                                    if piece:
-                                        answer += piece
-                                except (json.JSONDecodeError, IndexError, AttributeError, KeyError):
-                                    continue
+                        )
+                        response.raise_for_status()
+                        data = response.json()
+
+                        answer = data.get("choices", [{}])[0].get("message", {}).get("content", "")
                     if answer.strip():
-                        call_logger.info(f"Goclaw responded via stream on attempt {attempt} ({len(answer)} chars)")
+                        call_logger.info(f"Hermes responded on attempt {attempt} ({len(answer)} chars)")
                         break
-                    call_logger.warning(f"Goclaw stream attempt {attempt} returned empty response")
+                    call_logger.warning(f"Hermes attempt {attempt} returned empty response")
                     last_error = "empty response"
                 except httpx.TimeoutException:
-                    call_logger.error(f"Goclaw stream attempt {attempt} timed out")
+                    call_logger.error(f"Hermes attempt {attempt} timed out")
                     last_error = "timeout"
                 except Exception as e:
-                    call_logger.error(f"Goclaw request failed on attempt {attempt}: {e}")
+                    call_logger.error(f"Hermes request failed on attempt {attempt}: {e}")
                     last_error = str(e)
 
                 if attempt < MAX_ATTEMPTS and not is_terminating:
@@ -974,7 +963,7 @@ async def websocket_endpoint(websocket: WebSocket):
             
             # Don't inject if the call is ending
             if is_terminating:
-                call_logger.info("Call is terminating, discarding Goclaw response")
+                call_logger.info("Call is terminating, discarding Hermes response")
                 return
             
             # Wait for bot to finish speaking before injecting (same pattern as hangup)
@@ -992,10 +981,15 @@ async def websocket_endpoint(websocket: WebSocket):
             # content with turn_complete=False - without the aggregator round
             # trip the model reads the answer and never speaks, and the call
             # dies on the idle timeout.
-            await llm.process_frame(
-                LLMMessagesAppendFrame([msg], run_llm=True),
-                FrameDirection.DOWNSTREAM,
-            )
+            # The try/except is load-bearing: an injection failure must degrade
+            # to "no answer delivered", never take down the call.
+            try:
+                await llm.process_frame(
+                    LLMMessagesAppendFrame([msg], run_llm=True),
+                    FrameDirection.DOWNSTREAM,
+                )
+            except Exception as e:
+                call_logger.error(f"Failed to inject Hermes answer into context: {e}")
         
         # Fire off the background task (survives caller interruptions)
         asyncio.create_task(_fetch_and_inject())
@@ -1022,12 +1016,17 @@ async def websocket_endpoint(websocket: WebSocket):
 
     async def lookup_events_handler(params: FunctionCallParams):
         days_ahead = params.arguments.get("days_ahead") or 60
+        days_back = params.arguments.get("days_back") or 0
         try:
             days_ahead = max(1, min(int(days_ahead), 365))
         except (TypeError, ValueError):
             days_ahead = 60
-        call_logger.info(f"Looking up upcoming events (next {days_ahead} days)")
-        result_text, ok = await civicrm_agent.get_upcoming_events(days_ahead=days_ahead)
+        try:
+            days_back = max(0, min(int(days_back), 365))
+        except (TypeError, ValueError):
+            days_back = 0
+        call_logger.info(f"Looking up events (next {days_ahead} days, past {days_back} days)")
+        result_text, ok = await civicrm_agent.get_upcoming_events(days_ahead=days_ahead, days_back=days_back)
         payload = ({"status": "success", "events": result_text} if ok
                    else {"status": "error", "message": result_text})
         call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str(payload))
@@ -1086,7 +1085,7 @@ async def websocket_endpoint(websocket: WebSocket):
     task = PipelineTask(
         pipeline, 
         params=PipelineParams(audio_in_sample_rate=8000, audio_out_sample_rate=8000, enable_metrics=True, enable_usage_metrics=True),
-        # 300s: the ask_support_bot wait (stall phrase, goclaw agent loop, one
+        # 300s: the ask_support_bot wait (stall phrase, Hermes agent loop, one
         # retry) can run well past two minutes of no frames. The old 120s idle
         # timeout killed the pipeline mid-lookup, which Twilio plays as
         # "Application error". end_call/webhook teardown still cancels instantly.
