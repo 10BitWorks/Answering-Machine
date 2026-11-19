@@ -1,4 +1,4 @@
-pipecat-ai[google,twilio,websocket]
+pipecat-ai[google,twilio,websocket]>=1.16.0
 fastapi
 uvicorn
 python-dotenv

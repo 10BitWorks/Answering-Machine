@@ -33,10 +33,11 @@ from pipecat.runner.utils import parse_telephony_websocket
 from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketTransport, FastAPIWebsocketParams
 from pipecat.serializers.twilio import TwilioFrameSerializer
-import pipecat.audio.resamplers.soxr_stream_resampler
-
-# MONKEY PATCH: Fix pipecat bug where Gemini's bursty audio causes the resampler to drop chunks
-pipecat.audio.resamplers.soxr_stream_resampler.CLEAR_STREAM_AFTER_SECS = 5.0
+# NOTE: A monkeypatch here used to raise Pipecat's soxr resampler
+# CLEAR_STREAM_AFTER_SECS to 5.0 to stop mid-word audio drops. Since
+# pipecat-ai 1.16.0 the transport output uses SincStreamAudioResampler,
+# which never clears its filter by default, so the patch is no longer
+# needed (and the constant no longer exists).
 
 load_dotenv(override=True)
 
@@ -56,7 +57,6 @@ from processors import SpeechTracker, CallerMuter, MetricsLogger
 
 
 import civicrm_agent
-import zammad_cti
 import zammad_agent
 
 app = FastAPI()
@@ -76,7 +76,7 @@ async def health():
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 # Note: Using the model name without the "models/" prefix or v1alpha features
 # was required to resolve the 1011 internal error.
-MODEL_NAME = "gemini-3.1-flash-live-preview"
+MODEL_NAME = "gemini-3.8-live"
 
 required_env_vars = [
     "GOOGLE_API_KEY",
@@ -86,10 +86,8 @@ required_env_vars = [
     "CIVICRM_API_KEY",
     "CIVICRM_SITE_KEY",
     "CIVICRM_SYSTEM_CONTACT_ID",
-    "ZAMMAD_API_TOKEN",
-    "ZAMMAD_CTI_ENDPOINT",
-    "GOCLAW_API_URL",
-    "GOCLAW_API_KEY"
+    "HERMES_API_URL",
+    "HERMES_API_KEY"
 ]
 
 missing_vars = [var for var in required_env_vars if not os.getenv(var)]
@@ -201,25 +199,11 @@ async def post_bot(request: Request):
         target_number = transfer_data.get("number")
         target_name = transfer_data.get("name")
         
-        # Get caller info to send the 'answer' event to Zammad
-        call_info = active_calls.get(call_sid, {})
-        from_num = call_info.get("from", "Unknown")
-        
         logger.info(f"Executing transfer for {call_sid} to {target_name} ({target_number})")
         
         # Clean up any lingering hangup request just in case
         if call_sid in pending_hangups:
             pending_hangups.remove(call_sid)
-            
-        # Push 'answer' to Zammad with the new target person's name
-        asyncio.create_task(zammad_cti.push_cti_event(
-            event="answer",
-            from_number=from_num,
-            to_number=target_number,
-            direction="in",
-            call_id=call_sid,
-            user_name=target_name
-        ))
         
         # For non-member callers, present the 10BitWorks number (the number they dialed)
         # as caller ID so the recipient knows it's a 10BitWorks call. Members pass through
@@ -551,20 +535,35 @@ async def websocket_endpoint(websocket: WebSocket):
                 },
                 required=["entity_type", "record_id"]
             ),
-#             FunctionSchema(
-#                 name="ask_support_bot",
-#                 description="Consult the 10BitWorks support bot for questions you cannot answer from your own knowledge. This AI support agent can search Slack archives for specific answers, but takes some time. Call this tool only when you don't know the answer. The tool will automatically return a 'processing' instruction telling you to stall naturally while it fetches the answer in the background.",
-#                 properties={
-#                     "question": {
-#                         "type": "string",
-#                         "description": "The message to send to the support bot. The first time you call this tool, mention who you are handling a call from and what was discussed so far. Ask for an unformatted text response within 20 seconds."
-#                     }
-#                 },
-#                 required=["question"]
-#             ),
+            FunctionSchema(
+                name="ask_support_bot",
+                description="Delegate a question to the 10BitWorks support bot, which CAN search Slack archives and community discussions on your behalf - you cannot search Slack directly, but you can always delegate to this tool. Use it whenever: the caller asks what people have said, posted, or discussed on Slack; the caller asks for details missing from your knowledge (instructor names, schedule specifics, recent decisions); or you are about to say 'I don't know' or tell the caller to check Slack themselves. Never tell the caller you cannot look something up - delegate here instead. This tool returns a 'processing' instruction telling you to stall naturally while the answer is fetched in the background. Feel free to chat with them (see missions) while you wait.",
+                properties={
+                    "question": {
+                        "type": "string",
+                        "description": "The message to send to the support bot. The first time you call this tool, mention you are the 10BitWorks Answering Machine, who you are handling a call from, and everything that was discussed so far. Ask for an unformatted text response within 20 seconds."
+                    }
+                },
+                required=["question"]
+            ),
+            FunctionSchema(
+                name="lookup_upcoming_events",
+                description="Look up events and classes on the 10BitWorks calendar (CiviCRM). Use this whenever the caller asks about upcoming classes, workshops, events, open houses, what's on the schedule, OR about events that recently happened (past openings, ceremonies, classes). Returns a list sorted by start date. For details not in the list (instructors, discussions, changes), use ask_support_bot.",
+                properties={
+                    "days_ahead": {
+                        "type": "integer",
+                        "description": "How many days ahead to search. Default 60. Use a larger value (e.g. 180) if the caller asks about a specific future season or 'later this year'."
+                    },
+                    "days_back": {
+                        "type": "integer",
+                        "description": "How many days BACK to include. Default 0 (upcoming only). Use 14-30 whenever the caller asks about recent or past events ('last week', 'the grand opening', 'did anything happen on Friday')."
+                    }
+                },
+                required=[]
+            ),
             FunctionSchema(
                 name="update_call_summary",
-                description="Update the running summary of this phone call, to be displayed in the call history. Only call this tool after each meaningful question is addressed, but never mention that you are doing it. In your summary, include who is calling, what they asked about, what answers were given, and whether their query was fully resolved. If not fully resolved, strongly suggest follow-up.",
+                description="Update the running summary of this phone call, to be displayed in the call history. Call this tool after each question, without mentioning that you are doing it. In your summary, include who is calling, what they asked about, what answers were given, and whether their query was fully resolved. If not fully resolved, strongly suggest follow-up.",
                 properties={
                     "summary": {
                         "type": "string",
@@ -881,82 +880,186 @@ async def websocket_endpoint(websocket: WebSocket):
 
     async def ask_support_bot_handler(params: FunctionCallParams):
         question = params.arguments.get("question", "")
-        goclaw_url = os.getenv("GOCLAW_API_URL")
-        goclaw_key = os.getenv("GOCLAW_API_KEY")
-        goclaw_agent = os.getenv("GOCLAW_AGENT", "10BitWorks-Answering-Machine")
-        
-        if not goclaw_url or not goclaw_key:
-            call_logger.error("GOCLAW_API_URL or GOCLAW_API_KEY not configured")
+        hermes_url = os.getenv("HERMES_API_URL", "http://10.0.24.1:8642/v1").rstrip("/")
+        # Accept base URLs with or without a /v1 suffix - the request path is
+        # appended below and some deployments configure the base with /v1.
+        if hermes_url.endswith("/v1"):
+            hermes_url = hermes_url[: -len("/v1")]
+        hermes_key = os.getenv("HERMES_API_KEY")
+        hermes_model = os.getenv("HERMES_MODEL", "hermes-agent")
+
+        if not hermes_url or not hermes_key:
+            call_logger.error("HERMES_API_URL or HERMES_API_KEY not configured")
             call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({"status": "error", "message": "Support bot is not available right now."}))
             await params.result_callback({"status": "error", "message": "Support bot is not available right now."})
             return
-        
-        call_logger.info(f"Consulting Goclaw support bot: {question[:80]}...")
-        
-        # Use caller's phone number as the Goclaw user ID for session continuity
-        goclaw_user_id = caller_number if caller_number != "Unknown Caller" else f"call-{call_sid}"
-        
+
+        call_logger.info(f"Consulting Hermes support bot: {question[:80]}...")
+
         # Event to keep the Pipecat tool task alive
         finished_event = asyncio.Event()
-        
-        async def _fetch_and_inject():
-            """Background task: query Goclaw and inject result into conversation context."""
+
+        async def _push_to_context(message_content: str) -> bool:
+            """Push a developer message through the assistant aggregator with
+            run_llm=True so the model speaks it now. Returns success.
+
+            On Pipecat 1.16 a bare append only queues content with
+            turn_complete=False - the aggregator round trip is what completes
+            the turn. An injection failure must degrade to "not spoken", never
+            take down the call."""
+            msg = {"role": "developer", "content": message_content}
             try:
-                # Give the bot time to speak its stall instruction before we potentially trigger speech again
-                await asyncio.sleep(0.5)
-                
-                async with httpx.AsyncClient(timeout=25.0) as client:
-                    response = await client.post(
-                        f"{goclaw_url.rstrip('/')}/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {goclaw_key}",
-                            "X-GoClaw-User-Id": goclaw_user_id,
-                            "X-GoClaw-Agent": goclaw_agent,
-                            "X-GoClaw-Session-Id": call_sid,
-                            "Content-Type": "application/json"
-                        },
-                        json={
-                            "messages": [{"role": "user", "content": question}]
-                        }
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-                    
-                    answer = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                    if not answer:
-                        call_logger.warning("Goclaw returned empty response")
-                        answer = "ERROR: The support bot returned an empty response. It may not be able to help with this query. Proceed to answer on your own."
-                    else:
-                        call_logger.info(f"Goclaw responded ({len(answer)} chars)")
-                    
-            except httpx.TimeoutException:
-                call_logger.error("Goclaw request timed out")
-                answer = "TIMEOUT: The support bot is taking too long to respond. Proceed to answer on your own."
+                await llm.process_frame(
+                    LLMMessagesAppendFrame([msg], run_llm=True),
+                    FrameDirection.DOWNSTREAM,
+                )
+                return True
             except Exception as e:
-                call_logger.error(f"Goclaw request failed: {e}")
-                answer = "ERROR: The support bot is currently unavailable. Proceed to answer on your own."
-            finally:
-                # Signal the tool handler task that it can safely finish
-                finished_event.set()
-            
+                call_logger.error(f"Failed to inject Hermes output into context: {e}")
+                return False
+
+        async def _fetch_and_inject():
+            """Background task: stream the Hermes agent's answer and narrate progress.
+
+            Hermes streams its agent loop as SSE: `content` deltas arrive per
+            iteration (its interim notes, e.g. "the channel shows the event
+            already happened"), separated by `reasoning_content` bursts while it
+            runs tools, ending with finish_reason=stop on the final answer.
+            Every interim segment is injected to the model as it lands (no
+            cap - the model decides how to weave them in); the last segment is
+            the answer. Each injection also feeds the pipeline frames, keeping
+            the call alive through long lookups.
+            """
+            MAX_ATTEMPTS = 2
+            answer = ""
+            last_error = None
+            for attempt in range(1, MAX_ATTEMPTS + 1):
+                answer = ""
+                segments = []
+                saw_stop = False
+                try:
+                    # Give the bot time to speak its stall instruction before we potentially trigger speech again
+                    if attempt == 1:
+                        await asyncio.sleep(0.5)
+
+                    headers = {
+                        "Authorization": f"Bearer {hermes_key}",
+                        "Content-Type": "application/json",
+                        "Accept": "text/event-stream",
+                    }
+                    payload = {
+                        "model": hermes_model,
+                        "stream": True,
+                        "messages": [{"role": "user", "content": question}],
+                    }
+                    # Generous read timeout: reasoning/tool gaps between streamed
+                    # iterations can be long, and each injection feeds the
+                    # pipeline's idle timer during the wait.
+                    timeout = httpx.Timeout(15.0, read=240.0, write=15.0, pool=15.0)
+                    async with httpx.AsyncClient(timeout=timeout) as client:
+                        async with client.stream(
+                            "POST",
+                            f"{hermes_url.rstrip('/')}/v1/chat/completions",
+                            headers=headers,
+                            json=payload,
+                        ) as response:
+                            response.raise_for_status()
+                            mode = "reasoning"
+                            async for line in response.aiter_lines():
+                                if not line.startswith("data:"):
+                                    continue
+                                data_str = line[5:].strip()
+                                if data_str == "[DONE]":
+                                    break
+                                try:
+                                    chunk = json.loads(data_str)
+                                except json.JSONDecodeError:
+                                    continue
+                                choices = chunk.get("choices") or [{}]
+                                delta = choices[0].get("delta") or {}
+                                if choices[0].get("finish_reason") == "stop":
+                                    saw_stop = True
+                                rc = delta.get("reasoning_content")
+                                ct = delta.get("content")
+                                if rc:
+                                    # Transition content -> reasoning closes an interim segment
+                                    if mode == "content" and current:
+                                        segments.append("".join(current))
+                                        seg_text = segments[-1].strip().replace("\n", " ")
+                                        call_logger.info(
+                                            f"Hermes interim segment #{len(segments)} ({len(seg_text)} chars)"
+                                        )
+                                        # Inject every interim segment, indefinitely:
+                                        # the model decides how to phrase/handle it.
+                                        if not is_terminating and len(seg_text) >= 40:
+                                            await await_bot_silence()
+                                            snippet = seg_text[:220]
+                                            await _push_to_context(
+                                                "SYSTEM INFO: MID-LOOKUP STATUS from the support bot. Relay "
+                                                "this progress to the caller in a non-technical way "
+                                                f"if needed to fill silence: \"{snippet}\" Do not answer the caller's main "
+                                                "question yet - more updates may follow."
+                                            )
+                                    current = []
+                                    mode = "reasoning"
+                                if ct:
+                                    mode = "content"
+                                    current.append(ct)
+                            if current:
+                                segments.append("".join(current))
+
+                    if not segments:
+                        call_logger.warning(f"Hermes attempt {attempt} returned no content")
+                        last_error = "empty response"
+                    else:
+                        answer = segments[-1]
+                        call_logger.info(
+                            f"Hermes streamed {len(segments)} segment(s) on attempt {attempt} "
+                            f"(answer {len(answer)} chars, stop={saw_stop})"
+                        )
+                        if answer.strip():
+                            break
+                        answer = ""
+                        last_error = "empty response"
+                except httpx.TimeoutException:
+                    call_logger.error(f"Hermes attempt {attempt} timed out")
+                    last_error = "timeout"
+                    # A timeout can still have produced segments (stop never seen) -
+                    # fall through with the last segment as a best-effort answer.
+                    if segments:
+                        answer = segments[-1]
+                        if answer.strip():
+                            call_logger.warning(f"Using best-effort answer after timeout ({len(answer)} chars)")
+                            break
+                except Exception as e:
+                    call_logger.error(f"Hermes request failed on attempt {attempt}: {e}")
+                    last_error = str(e)
+
+                if attempt < MAX_ATTEMPTS and not is_terminating:
+                    await asyncio.sleep(3.0)
+
+            if not answer.strip():
+                if last_error == "timeout":
+                    answer = "TIMEOUT: The support bot is taking too long to respond. Proceed to answer on your own."
+                else:
+                    answer = "ERROR: The support bot is currently unavailable. Proceed to answer on your own."
+
+            # Signal the tool handler task that it can safely finish
+            finished_event.set()
+
             # Don't inject if the call is ending
             if is_terminating:
-                call_logger.info("Call is terminating, discarding Goclaw response")
+                call_logger.info("Call is terminating, discarding Hermes response")
                 return
-            
+
             # Wait for bot to finish speaking before injecting (same pattern as hangup)
             await await_bot_silence()
-            
-            msg = {
-                "role": "developer",
-                "content": f"SUPPORT BOT RESPONSE: The support bot answered the question '{question}' as follows:\n\n{answer}\n\nRelay this information to the caller naturally, in your own voice. Do not mention the support bot or that you looked anything up."
-            }
-            
-            # Inject into local context for bookkeeping
-            context.add_message(msg)
-            
-            # Push directly to GeminiLiveLLMService to bypass aggregators and send to WebSocket
-            await llm.process_frame(LLMMessagesAppendFrame([msg]), FrameDirection.DOWNSTREAM)
+
+            # Inject the final answer - terse on purpose: the model decides phrasing
+            try:
+                await _push_to_context(f"ANSWER: {answer}")
+            except Exception as e:
+                call_logger.error(f"Failed to inject Hermes answer into context: {e}")
         
         # Fire off the background task (survives caller interruptions)
         asyncio.create_task(_fetch_and_inject())
@@ -964,11 +1067,11 @@ async def websocket_endpoint(websocket: WebSocket):
         # Return immediately to Pipecat framework so the bot can stall naturally
         call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str({
             "status": "processing",
-            "instruction": "The support bot is looking this up now. If you have no answer to provide on your own, indicate the caller should wait by saying a phrase like 'Let me check on that for you' OR 'One moment.' OR 'Let me see... looking into that for you now.' OR 'just a sec.' The answer will arrive within 30 seconds and be provided to you automatically."
+            "instruction": "The support bot is looking this up now. If you have no answer to provide on your own, indicate the caller should wait by saying a phrase like 'Let me check on that for you' OR 'One moment.' OR 'Let me see... looking into that for you now.' OR 'just a sec.' The answer will arrive within about two minutes and be provided to you automatically."
         }))
         await params.result_callback({
             "status": "processing",
-            "instruction": "The support bot is looking this up now. If you have no answer to provide on your own, indicate the caller should wait by saying a phrase like 'Let me check on that for you' OR 'One moment.' OR 'Let me see... looking into that for you now.' OR 'just a sec.' The answer will arrive within 30 seconds and be provided to you automatically."
+            "instruction": "The support bot is looking this up now. If you have no answer to provide on your own, indicate the caller should wait by saying a phrase like 'Let me check on that for you' OR 'One moment.' OR 'Let me see... looking into that for you now.' OR 'just a sec.' The answer will arrive within about two minutes and be provided to you automatically."
         })
 
         # Wait here to prevent the Pipecat tool handler task from finishing immediately.
@@ -981,6 +1084,24 @@ async def websocket_endpoint(websocket: WebSocket):
             call_logger.debug("ask_support_bot_handler cancelled by interruption, background task survives.")
             pass
 
+    async def lookup_events_handler(params: FunctionCallParams):
+        days_ahead = params.arguments.get("days_ahead") or 60
+        days_back = params.arguments.get("days_back") or 0
+        try:
+            days_ahead = max(1, min(int(days_ahead), 365))
+        except (TypeError, ValueError):
+            days_ahead = 60
+        try:
+            days_back = max(0, min(int(days_back), 365))
+        except (TypeError, ValueError):
+            days_back = 0
+        call_logger.info(f"Looking up events (next {days_ahead} days, past {days_back} days)")
+        result_text, ok = await civicrm_agent.get_upcoming_events(days_ahead=days_ahead, days_back=days_back)
+        payload = ({"status": "success", "events": result_text} if ok
+                   else {"status": "error", "message": result_text})
+        call_logger.info(f"Sending tool result to Gemini Live for function={params.function_name}, tool_result_message=" + str(payload))
+        await params.result_callback(payload)
+
     llm.register_function("end_call", hang_up, timeout_secs=10.0)
     llm.register_function("report_missing_knowledge", notify_slack, timeout_secs=2.0)
     llm.register_function("transfer_call", transfer_call_handler, timeout_secs=10.0)
@@ -989,7 +1110,8 @@ async def websocket_endpoint(websocket: WebSocket):
     llm.register_function("add_new_email", add_email_handler, timeout_secs=3.0)
     llm.register_function("set_info_as_primary", set_primary_handler, timeout_secs=3.0)
     llm.register_function("create_my_contact_record", create_contact_handler, timeout_secs=3.0)
-    #llm.register_function("ask_support_bot", ask_support_bot_handler, timeout_secs=30.0)
+    llm.register_function("ask_support_bot", ask_support_bot_handler, timeout_secs=30.0)
+    llm.register_function("lookup_upcoming_events", lookup_events_handler, timeout_secs=10.0)
 
     async def update_call_summary_handler(params: FunctionCallParams):
         summary = params.arguments.get("summary", "")
@@ -1033,7 +1155,11 @@ async def websocket_endpoint(websocket: WebSocket):
     task = PipelineTask(
         pipeline, 
         params=PipelineParams(audio_in_sample_rate=8000, audio_out_sample_rate=8000, enable_metrics=True, enable_usage_metrics=True),
-        idle_timeout_secs=120.0
+        # 300s: the ask_support_bot wait (stall phrase, Hermes agent loop, one
+        # retry) can run well past two minutes of no frames. The old 120s idle
+        # timeout killed the pipeline mid-lookup, which Twilio plays as
+        # "Application error". end_call/webhook teardown still cancels instantly.
+        idle_timeout_secs=300.0
     )
 
     if call_sid in active_calls:
@@ -1116,24 +1242,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 
-
-        # Determine the recipient label for Zammad CTI
-        recipient_label = "Makerspace"
-        if "2105470221" in destination_number:
-            recipient_label = "Virtual Receptionist"
-        elif "8559042954" in destination_number:
-            recipient_label = "Test Line"
-
-        # Trigger Zammad CTI answer event
-        asyncio.create_task(zammad_cti.push_cti_event(
-            "answer", 
-            caller_number, 
-            destination_number, 
-            "in", 
-            call_data["call_id"], 
-            user_name=recipient_label,
-            answering_number="10Bot"
-        ))
 
         context.add_message(
             {"role": "developer", "content": f"SYSTEM INFO: Your name is {selected_voice}. The current date and time is {now}. The caller's phone number is {caller_number}.\n\n{detail_block}\n\nSimply say: {greeting}"}

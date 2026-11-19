@@ -40,4 +40,4 @@ This project implements a locally hosted Pipecat instance that routes audio betw
 - When a call comes in, Twilio sends a GET request to `/twiml`.
 - The server responds with TwiML instructions to connect the call to a WebSocket stream (`/ws`).
 - Pipecat's `FastAPIWebsocketTransport` handles the bidirectional audio stream from Twilio.
-- The `GeminiLiveLLMService` interacts with `gemini-3.1-flash-live-preview` to provide real-time speech-to-speech AI interaction.
+- The `GeminiLiveLLMService` interacts with `gemini-3.8-live` to provide real-time speech-to-speech AI interaction.
