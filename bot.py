@@ -537,11 +537,11 @@ async def websocket_endpoint(websocket: WebSocket):
             ),
             FunctionSchema(
                 name="ask_support_bot",
-                description="Delegate a question to the 10BitWorks support bot, which CAN search Slack archives and community discussions on your behalf - you cannot search Slack directly, but you can always delegate to this tool. Use it whenever: the caller asks what people have said, posted, or discussed on Slack; the caller asks for details missing from your knowledge (instructor names, schedule specifics, recent decisions); or you are about to say 'I don't know' or tell the caller to check Slack themselves. Never tell the caller you cannot look something up - delegate here instead. This tool returns a 'processing' instruction telling you to stall naturally while the answer is fetched in the background.",
+                description="Delegate a question to the 10BitWorks support bot, which CAN search Slack archives and community discussions on your behalf - you cannot search Slack directly, but you can always delegate to this tool. Use it whenever: the caller asks what people have said, posted, or discussed on Slack; the caller asks for details missing from your knowledge (instructor names, schedule specifics, recent decisions); or you are about to say 'I don't know' or tell the caller to check Slack themselves. Never tell the caller you cannot look something up - delegate here instead. This tool returns a 'processing' instruction telling you to stall naturally while the answer is fetched in the background. Feel free to chat with them (see missions) while you wait.",
                 properties={
                     "question": {
                         "type": "string",
-                        "description": "The message to send to the support bot. The first time you call this tool, mention who you are handling a call from and what was discussed so far. Ask for an unformatted text response within 20 seconds."
+                        "description": "The message to send to the support bot. The first time you call this tool, mention you are the 10BitWorks Answering Machine, who you are handling a call from, and everything that was discussed so far. Ask for an unformatted text response within 20 seconds."
                     }
                 },
                 required=["question"]
@@ -563,7 +563,7 @@ async def websocket_endpoint(websocket: WebSocket):
             ),
             FunctionSchema(
                 name="update_call_summary",
-                description="Update the running summary of this phone call, to be displayed in the call history. Only call this tool after each meaningful question is addressed, but never mention that you are doing it. In your summary, include who is calling, what they asked about, what answers were given, and whether their query was fully resolved. If not fully resolved, strongly suggest follow-up.",
+                description="Update the running summary of this phone call, to be displayed in the call history. Call this tool after each question, without mentioning that you are doing it. In your summary, include who is calling, what they asked about, what answers were given, and whether their query was fully resolved. If not fully resolved, strongly suggest follow-up.",
                 properties={
                     "summary": {
                         "type": "string",
@@ -925,10 +925,10 @@ async def websocket_endpoint(websocket: WebSocket):
             iteration (its interim notes, e.g. "the channel shows the event
             already happened"), separated by `reasoning_content` bursts while it
             runs tools, ending with finish_reason=stop on the final answer.
-            Content segments before the last one are spoken to the caller as
-            brief progress updates; the last segment is the answer. Each spoken
-            injection also feeds the pipeline frames, keeping the call alive
-            through long lookups.
+            Every interim segment is injected to the model as it lands (no
+            cap - the model decides how to weave them in); the last segment is
+            the answer. Each injection also feeds the pipeline frames, keeping
+            the call alive through long lookups.
             """
             MAX_ATTEMPTS = 2
             answer = ""
@@ -953,11 +953,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         "messages": [{"role": "user", "content": question}],
                     }
                     # Generous read timeout: reasoning/tool gaps between streamed
-                    # iterations can be long, and spoken progress injections keep
-                    # the pipeline's idle timer fed during the wait.
+                    # iterations can be long, and each injection feeds the
+                    # pipeline's idle timer during the wait.
                     timeout = httpx.Timeout(15.0, read=240.0, write=15.0, pool=15.0)
-                    spoken_progress = 0
-                    last_progress_time = asyncio.get_event_loop().time()
                     async with httpx.AsyncClient(timeout=timeout) as client:
                         async with client.stream(
                             "POST",
@@ -991,27 +989,17 @@ async def websocket_endpoint(websocket: WebSocket):
                                         call_logger.info(
                                             f"Hermes interim segment #{len(segments)} ({len(seg_text)} chars)"
                                         )
-                                        # Live narration: condense and speak this progress update
-                                        now_t = asyncio.get_event_loop().time()
-                                        if (
-                                            spoken_progress < 3
-                                            and not is_terminating
-                                            and now_t - last_progress_time >= 15.0
-                                            and len(seg_text) >= 40
-                                        ):
+                                        # Inject every interim segment, indefinitely:
+                                        # the model decides how to phrase/handle it.
+                                        if not is_terminating and len(seg_text) >= 40:
                                             await await_bot_silence()
                                             snippet = seg_text[:220]
-                                            ok = await _push_to_context(
-                                                "SYSTEM INFO: MID-LOOKUP STATUS. The support bot is still "
-                                                "researching. In one short phrase, tell the caller this "
-                                                f"progress update naturally, then say you are continuing "
-                                                f"to look: \"{snippet}\" Do not answer the caller's main "
-                                                "question yet."
+                                            await _push_to_context(
+                                                "SYSTEM INFO: MID-LOOKUP STATUS from the support bot. Relay "
+                                                "this progress to the caller however fits the conversation "
+                                                f"best: \"{snippet}\" Do not answer the caller's main "
+                                                "question yet - more updates may follow."
                                             )
-                                            if ok:
-                                                spoken_progress += 1
-                                                last_progress_time = asyncio.get_event_loop().time()
-                                                call_logger.info(f"Spoken progress update {spoken_progress}")
                                     current = []
                                     mode = "reasoning"
                                 if ct:
@@ -1058,34 +1046,18 @@ async def websocket_endpoint(websocket: WebSocket):
 
             # Signal the tool handler task that it can safely finish
             finished_event.set()
-            
+
             # Don't inject if the call is ending
             if is_terminating:
                 call_logger.info("Call is terminating, discarding Hermes response")
                 return
-            
+
             # Wait for bot to finish speaking before injecting (same pattern as hangup)
             await await_bot_silence()
-            
-            msg = {
-                "role": "developer",
-                "content": f"SUPPORT BOT RESPONSE: The support bot answered the question '{question}' as follows:\n\n{answer}\n\nRelay this information to the caller naturally, in your own voice. Do not mention the support bot or that you looked anything up. You already gave the caller brief progress updates while researching - do not repeat those updates, just deliver the complete answer now."
-            }
 
-            # Push the append frame with run_llm=True so it flows through the
-            # assistant aggregator (llm's downstream neighbor), which lands the
-            # message in context AND pushes the context frame back upstream that
-            # completes the turn. On Pipecat 1.16 a bare append only queues the
-            # content with turn_complete=False - without the aggregator round
-            # trip the model reads the answer and never speaks, and the call
-            # dies on the idle timeout.
-            # The try/except is load-bearing: an injection failure must degrade
-            # to "no answer delivered", never take down the call.
+            # Inject the final answer - terse on purpose: the model decides phrasing
             try:
-                await llm.process_frame(
-                    LLMMessagesAppendFrame([msg], run_llm=True),
-                    FrameDirection.DOWNSTREAM,
-                )
+                await _push_to_context(f"ANSWER: {answer}")
             except Exception as e:
                 call_logger.error(f"Failed to inject Hermes answer into context: {e}")
         
