@@ -899,73 +899,150 @@ async def websocket_endpoint(websocket: WebSocket):
         # Event to keep the Pipecat tool task alive
         finished_event = asyncio.Event()
 
-        async def _fetch_and_inject():
-            """Background task: query the Hermes agent and inject the result into context.
+        async def _push_to_context(message_content: str) -> bool:
+            """Push a developer message through the assistant aggregator with
+            run_llm=True so the model speaks it now. Returns success.
 
-            Hermes (same host as this bot, reached directly via its docker-bridge
-            IP) runs its own agent loop with Slack access, so a lookup can take
-            1-2 minutes. The wait must never kill the call: per-attempt read
-            timeouts are capped so that even a retry always injects a fallback
-            answer before the pipeline's idle timeout fires, and every failure
-            becomes an instruction to answer on our own rather than a crash.
+            On Pipecat 1.16 a bare append only queues content with
+            turn_complete=False - the aggregator round trip is what completes
+            the turn. An injection failure must degrade to "not spoken", never
+            take down the call."""
+            msg = {"role": "developer", "content": message_content}
+            try:
+                await llm.process_frame(
+                    LLMMessagesAppendFrame([msg], run_llm=True),
+                    FrameDirection.DOWNSTREAM,
+                )
+                return True
+            except Exception as e:
+                call_logger.error(f"Failed to inject Hermes output into context: {e}")
+                return False
+
+        async def _fetch_and_inject():
+            """Background task: stream the Hermes agent's answer and narrate progress.
+
+            Hermes streams its agent loop as SSE: `content` deltas arrive per
+            iteration (its interim notes, e.g. "the channel shows the event
+            already happened"), separated by `reasoning_content` bursts while it
+            runs tools, ending with finish_reason=stop on the final answer.
+            Content segments before the last one are spoken to the caller as
+            brief progress updates; the last segment is the answer. Each spoken
+            injection also feeds the pipeline frames, keeping the call alive
+            through long lookups.
             """
             MAX_ATTEMPTS = 2
             answer = ""
             last_error = None
             for attempt in range(1, MAX_ATTEMPTS + 1):
                 answer = ""
+                segments = []
+                saw_stop = False
                 try:
                     # Give the bot time to speak its stall instruction before we potentially trigger speech again
                     if attempt == 1:
                         await asyncio.sleep(0.5)
 
-                    # Time-box the agent: attempt 1 allows a couple of quick
-                    # lookups; attempt 2 is a strict answer-from-memory retry so
-                    # a timed-out deep investigation is never re-run in full
-                    # (that double-execution is what made lookups take forever).
-                    if attempt == 1:
-                        content = (
-                            f"{question}\n\n(Time-box: respond within 60 seconds and use at most two quick "
-                            "lookups. If not fully resolved by then, briefly state what you know and note "
-                            "what you could not verify.)"
-                        )
-                    else:
-                        content = (
-                            f"{question}\n\n(Time-box: a previous attempt timed out. Answer IMMEDIATELY from "
-                            "what you already know or found - no tool calls, one short paragraph.)"
-                        )
-
                     headers = {
                         "Authorization": f"Bearer {hermes_key}",
                         "Content-Type": "application/json",
+                        "Accept": "text/event-stream",
                     }
                     payload = {
                         "model": hermes_model,
-                        "messages": [{"role": "user", "content": content}],
+                        "stream": True,
+                        "messages": [{"role": "user", "content": question}],
                     }
-                    # Attempt-specific read timeouts: 2 attempts + retry sleep
-                    # fit inside the pipeline's 300s idle timeout, so a fallback
-                    # answer is always injected before the call can be torn down.
-                    read_timeout = 150.0 if attempt == 1 else 100.0
-                    timeout = httpx.Timeout(15.0, read=read_timeout, write=15.0, pool=15.0)
+                    # Generous read timeout: reasoning/tool gaps between streamed
+                    # iterations can be long, and spoken progress injections keep
+                    # the pipeline's idle timer fed during the wait.
+                    timeout = httpx.Timeout(15.0, read=240.0, write=15.0, pool=15.0)
+                    spoken_progress = 0
+                    last_progress_time = asyncio.get_event_loop().time()
                     async with httpx.AsyncClient(timeout=timeout) as client:
-                        response = await client.post(
+                        async with client.stream(
+                            "POST",
                             f"{hermes_url.rstrip('/')}/v1/chat/completions",
                             headers=headers,
                             json=payload,
-                        )
-                        response.raise_for_status()
-                        data = response.json()
+                        ) as response:
+                            response.raise_for_status()
+                            mode = "reasoning"
+                            async for line in response.aiter_lines():
+                                if not line.startswith("data:"):
+                                    continue
+                                data_str = line[5:].strip()
+                                if data_str == "[DONE]":
+                                    break
+                                try:
+                                    chunk = json.loads(data_str)
+                                except json.JSONDecodeError:
+                                    continue
+                                choices = chunk.get("choices") or [{}]
+                                delta = choices[0].get("delta") or {}
+                                if choices[0].get("finish_reason") == "stop":
+                                    saw_stop = True
+                                rc = delta.get("reasoning_content")
+                                ct = delta.get("content")
+                                if rc:
+                                    # Transition content -> reasoning closes an interim segment
+                                    if mode == "content" and current:
+                                        segments.append("".join(current))
+                                        seg_text = segments[-1].strip().replace("\n", " ")
+                                        call_logger.info(
+                                            f"Hermes interim segment #{len(segments)} ({len(seg_text)} chars)"
+                                        )
+                                        # Live narration: condense and speak this progress update
+                                        now_t = asyncio.get_event_loop().time()
+                                        if (
+                                            spoken_progress < 3
+                                            and not is_terminating
+                                            and now_t - last_progress_time >= 15.0
+                                            and len(seg_text) >= 40
+                                        ):
+                                            await await_bot_silence()
+                                            snippet = seg_text[:220]
+                                            ok = await _push_to_context(
+                                                "SYSTEM INFO: MID-LOOKUP STATUS. The support bot is still "
+                                                "researching. In one short phrase, tell the caller this "
+                                                f"progress update naturally, then say you are continuing "
+                                                f"to look: \"{snippet}\" Do not answer the caller's main "
+                                                "question yet."
+                                            )
+                                            if ok:
+                                                spoken_progress += 1
+                                                last_progress_time = asyncio.get_event_loop().time()
+                                                call_logger.info(f"Spoken progress update {spoken_progress}")
+                                    current = []
+                                    mode = "reasoning"
+                                if ct:
+                                    mode = "content"
+                                    current.append(ct)
+                            if current:
+                                segments.append("".join(current))
 
-                        answer = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                    if answer.strip():
-                        call_logger.info(f"Hermes responded on attempt {attempt} ({len(answer)} chars)")
-                        break
-                    call_logger.warning(f"Hermes attempt {attempt} returned empty response")
-                    last_error = "empty response"
+                    if not segments:
+                        call_logger.warning(f"Hermes attempt {attempt} returned no content")
+                        last_error = "empty response"
+                    else:
+                        answer = segments[-1]
+                        call_logger.info(
+                            f"Hermes streamed {len(segments)} segment(s) on attempt {attempt} "
+                            f"(answer {len(answer)} chars, stop={saw_stop})"
+                        )
+                        if answer.strip():
+                            break
+                        answer = ""
+                        last_error = "empty response"
                 except httpx.TimeoutException:
                     call_logger.error(f"Hermes attempt {attempt} timed out")
                     last_error = "timeout"
+                    # A timeout can still have produced segments (stop never seen) -
+                    # fall through with the last segment as a best-effort answer.
+                    if segments:
+                        answer = segments[-1]
+                        if answer.strip():
+                            call_logger.warning(f"Using best-effort answer after timeout ({len(answer)} chars)")
+                            break
                 except Exception as e:
                     call_logger.error(f"Hermes request failed on attempt {attempt}: {e}")
                     last_error = str(e)
@@ -992,7 +1069,7 @@ async def websocket_endpoint(websocket: WebSocket):
             
             msg = {
                 "role": "developer",
-                "content": f"SUPPORT BOT RESPONSE: The support bot answered the question '{question}' as follows:\n\n{answer}\n\nRelay this information to the caller naturally, in your own voice. Do not mention the support bot or that you looked anything up."
+                "content": f"SUPPORT BOT RESPONSE: The support bot answered the question '{question}' as follows:\n\n{answer}\n\nRelay this information to the caller naturally, in your own voice. Do not mention the support bot or that you looked anything up. You already gave the caller brief progress updates while researching - do not repeat those updates, just deliver the complete answer now."
             }
 
             # Push the append frame with run_llm=True so it flows through the
