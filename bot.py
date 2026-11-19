@@ -996,8 +996,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                             snippet = seg_text[:220]
                                             await _push_to_context(
                                                 "SYSTEM INFO: MID-LOOKUP STATUS from the support bot. Relay "
-                                                "this progress to the caller however fits the conversation "
-                                                f"best: \"{snippet}\" Do not answer the caller's main "
+                                                "this progress to the caller in a non-technical way "
+                                                f"if needed to fill silence: \"{snippet}\" Do not answer the caller's main "
                                                 "question yet - more updates may follow."
                                             )
                                     current = []
