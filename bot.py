@@ -919,18 +919,35 @@ async def websocket_endpoint(websocket: WebSocket):
                     if attempt == 1:
                         await asyncio.sleep(0.5)
 
+                    # Time-box the agent: attempt 1 allows a couple of quick
+                    # lookups; attempt 2 is a strict answer-from-memory retry so
+                    # a timed-out deep investigation is never re-run in full
+                    # (that double-execution is what made lookups take forever).
+                    if attempt == 1:
+                        content = (
+                            f"{question}\n\n(Time-box: respond within 60 seconds and use at most two quick "
+                            "lookups. If not fully resolved by then, briefly state what you know and note "
+                            "what you could not verify.)"
+                        )
+                    else:
+                        content = (
+                            f"{question}\n\n(Time-box: a previous attempt timed out. Answer IMMEDIATELY from "
+                            "what you already know or found - no tool calls, one short paragraph.)"
+                        )
+
                     headers = {
                         "Authorization": f"Bearer {hermes_key}",
                         "Content-Type": "application/json",
                     }
                     payload = {
                         "model": hermes_model,
-                        "messages": [{"role": "user", "content": question}],
+                        "messages": [{"role": "user", "content": content}],
                     }
-                    # read=130s per attempt: 2 attempts + retry sleep fit inside
-                    # the pipeline's 300s idle timeout, so a fallback answer is
-                    # always injected before the call can be torn down.
-                    timeout = httpx.Timeout(15.0, read=130.0, write=15.0, pool=15.0)
+                    # Attempt-specific read timeouts: 2 attempts + retry sleep
+                    # fit inside the pipeline's 300s idle timeout, so a fallback
+                    # answer is always injected before the call can be torn down.
+                    read_timeout = 150.0 if attempt == 1 else 100.0
+                    timeout = httpx.Timeout(15.0, read=read_timeout, write=15.0, pool=15.0)
                     async with httpx.AsyncClient(timeout=timeout) as client:
                         response = await client.post(
                             f"{hermes_url.rstrip('/')}/v1/chat/completions",
