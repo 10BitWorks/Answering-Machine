@@ -880,7 +880,11 @@ async def websocket_endpoint(websocket: WebSocket):
 
     async def ask_support_bot_handler(params: FunctionCallParams):
         question = params.arguments.get("question", "")
-        hermes_url = os.getenv("HERMES_API_URL", "http://10.0.24.1:8642/v1")
+        hermes_url = os.getenv("HERMES_API_URL", "http://10.0.24.1:8642/v1").rstrip("/")
+        # Accept base URLs with or without a /v1 suffix - the request path is
+        # appended below and some deployments configure the base with /v1.
+        if hermes_url.endswith("/v1"):
+            hermes_url = hermes_url[: -len("/v1")]
         hermes_key = os.getenv("HERMES_API_KEY")
         hermes_model = os.getenv("HERMES_MODEL", "hermes-agent")
 
